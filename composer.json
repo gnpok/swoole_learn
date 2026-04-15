@@ -1,0 +1,27 @@
+{
+    "name": "swoole/learn",
+    "description": "Swoole learning examples with tests",
+    "type": "project",
+    "require": {
+        "php": "^8.3"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^12.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "SwooleLearn\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "SwooleLearn\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit"
+    },
+    "suggest": {
+        "ext-swoole": "Install Swoole extension to run examples against a real runtime."
+    }
+}
