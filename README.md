@@ -26,12 +26,14 @@ composer test
 - HTTP 路由示例：`src/Learning/HttpRouteRegistrar.php`
 - 协程批处理示例：`src/Learning/CoroutineBatchRunner.php`
 - 定时器示例：`src/Learning/IntervalTicker.php`
+- WebSocket 聊天服务器示例：`src/Learning/Chat/ChatServer.php`
 
 对应的真实 Swoole 运行时封装：
 
 - `src/Learning/Runtime/SwooleHttpServerRuntime.php`
 - `src/Learning/Runtime/SwooleCoroutineRuntime.php`
 - `src/Learning/Runtime/SwooleTimerRuntime.php`
+- `src/Learning/Runtime/SwooleWebSocketServerRuntime.php`
 
 ## 4. 示例脚本
 
@@ -41,6 +43,7 @@ composer test
 php examples/http_server.php
 php examples/coroutine_batch.php
 php examples/timer_tick.php
+php examples/chat_server.php
 php examples/short_url_api_server.php
 php examples/short_url_visit_log_worker.php
 ```
