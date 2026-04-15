@@ -22,6 +22,7 @@ use Throwable;
 final class ShortUrlApiController
 {
     private int $inFlightRequests = 0;
+    private ErrorResponseFactory $errorFactory;
 
     public function __construct(
         private readonly ShortUrlService $service,
@@ -31,6 +32,7 @@ final class ShortUrlApiController
         private readonly ?HealthReporterInterface $healthReporter = null
     )
     {
+        $this->errorFactory = new ErrorResponseFactory();
     }
 
     /**
@@ -41,7 +43,7 @@ final class ShortUrlApiController
     {
         $query = $context->query ?? [];
         $body = $context->body;
-        $traceId = $context->traceId !== '' ? $context->traceId : $this->newTraceId();
+        $traceId = $context->traceId !== '' ? $context->traceId : TraceContext::newTraceId();
         $route = 'unknown';
         $method = strtoupper($context->method);
         $response = null;
@@ -54,6 +56,22 @@ final class ShortUrlApiController
             name: 'shorturl_http_in_flight_requests',
             value: (float) $this->inFlightRequests,
             help: 'Number of currently processing HTTP requests.'
+        );
+
+        $traceSource = 'generated';
+        if (($context->headers['traceparent'] ?? null) !== null) {
+            $parsedTraceId = TraceContext::extractTraceIdFromTraceparent((string) $context->headers['traceparent']);
+            if ($parsedTraceId !== null) {
+                $traceId = $parsedTraceId;
+                $traceSource = 'traceparent';
+            }
+        } elseif (($context->headers['x-trace-id'] ?? null) !== null || ($context->headers['X-Trace-Id'] ?? null) !== null) {
+            $traceSource = 'x-trace-id';
+        }
+        $metrics->incrementCounter(
+            name: 'shorturl_trace_context_total',
+            labels: ['source' => $traceSource],
+            help: 'Trace context source used for request correlation.'
         );
 
         try {
@@ -72,6 +90,12 @@ final class ShortUrlApiController
                     'checks' => [],
                 ];
                 $statusCode = ($report['status'] ?? 'down') === 'down' ? 503 : 200;
+                $metrics->setGauge(
+                    name: 'shorturl_readiness_status',
+                    value: $statusCode === 200 ? 1.0 : 0.0,
+                    labels: ['status' => (string) ($report['status'] ?? 'down')],
+                    help: 'Readiness probe status where 1=ready and 0=not-ready.'
+                );
                 $response = ApiResponse::json($statusCode, $report);
             } elseif ($context->method === 'GET' && $context->path === '/metrics') {
                 $route = 'metrics';
@@ -106,22 +130,27 @@ final class ShortUrlApiController
                 $route = 'admin_bulk_disable';
                 $response = $this->bulkDisable($body, $context);
             } else {
-                $response = ApiResponse::json(404, ['error' => 'Route not found.']);
+                $response = $this->errorFactory->build(
+                    statusCode: 404,
+                    code: ErrorCode::ROUTE_NOT_FOUND,
+                    message: 'Route not found.',
+                    traceId: $traceId
+                );
             }
         } catch (ValidationException $exception) {
-            $response = ApiResponse::json(422, ['error' => $exception->getMessage()]);
+            $response = $this->errorFactory->fromException($exception, 422, $traceId);
         } catch (ConflictException $exception) {
-            $response = ApiResponse::json(409, ['error' => $exception->getMessage()]);
+            $response = $this->errorFactory->fromException($exception, 409, $traceId);
         } catch (RateLimitException $exception) {
-            $response = ApiResponse::json(429, ['error' => $exception->getMessage()]);
+            $response = $this->errorFactory->fromException($exception, 429, $traceId);
         } catch (UnauthorizedException $exception) {
-            $response = ApiResponse::json(401, ['error' => $exception->getMessage()]);
+            $response = $this->errorFactory->fromException($exception, 401, $traceId);
         } catch (NotFoundException $exception) {
-            $response = ApiResponse::json(404, ['error' => $exception->getMessage()]);
+            $response = $this->errorFactory->fromException($exception, 404, $traceId);
         } catch (InactiveShortUrlException $exception) {
-            $response = ApiResponse::json(410, ['error' => $exception->getMessage()]);
+            $response = $this->errorFactory->fromException($exception, 410, $traceId);
         } catch (Throwable $exception) {
-            $response = ApiResponse::json(500, ['error' => 'Internal server error.', 'detail' => $exception->getMessage()]);
+            $response = $this->errorFactory->fromThrowable($exception, $traceId);
             $logger->error('Unhandled API error', [
                 'trace_id' => $traceId,
                 'method' => $method,
@@ -131,12 +160,14 @@ final class ShortUrlApiController
         } finally {
             $durationSeconds = (hrtime(true) - $startedAtNs) / 1_000_000_000;
             $statusCode = $response?->statusCode ?? 500;
+            $errorClass = (string) intdiv($statusCode, 100) . 'xx';
             $metrics->incrementCounter(
                 name: 'shorturl_http_requests_total',
                 labels: [
                     'method' => $method,
                     'route' => $route,
                     'status_code' => (string) $statusCode,
+                    'error_class' => $errorClass,
                 ],
                 help: 'Total HTTP requests processed by short URL API.'
             );
@@ -173,7 +204,10 @@ final class ShortUrlApiController
             }
         }
 
-        return $this->withTrace($response ?? ApiResponse::json(500, ['error' => 'Internal server error.']), $traceId);
+        return $this->withTrace(
+            $response ?? $this->errorFactory->build(500, ErrorCode::INTERNAL_SERVER_ERROR, 'Internal server error.', $traceId),
+            $traceId
+        );
     }
 
     /**
@@ -341,12 +375,4 @@ final class ShortUrlApiController
         return new ApiResponse($response->statusCode, $response->body, $headers);
     }
 
-    private function newTraceId(): string
-    {
-        try {
-            return bin2hex(random_bytes(8));
-        } catch (Throwable) {
-            return str_replace('.', '', uniqid('trace', true));
-        }
-    }
 }

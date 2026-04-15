@@ -19,6 +19,7 @@ use SwooleLearn\ShortUrl\Entity\ShortUrlRecord;
 use SwooleLearn\ShortUrl\Exception\ConflictException;
 use SwooleLearn\ShortUrl\Exception\InactiveShortUrlException;
 use SwooleLearn\ShortUrl\Exception\RateLimitException;
+use SwooleLearn\ShortUrl\Exception\ConflictShortCodeException;
 use SwooleLearn\ShortUrl\Exception\ValidationException;
 use SwooleLearn\ShortUrl\Observability\InMemoryPrometheusCollector;
 use SwooleLearn\ShortUrl\Observability\LoggerInterface;
@@ -64,7 +65,7 @@ final class ShortUrlServiceTest extends TestCase
 
         $service = $this->newService($repository, $cache, $stats, $limiter, $generator);
 
-        $this->expectException(ConflictException::class);
+        $this->expectException(ConflictShortCodeException::class);
         $service->create('https://example.com/new', 'learn01');
     }
 

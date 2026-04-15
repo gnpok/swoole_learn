@@ -11,6 +11,7 @@ use SwooleLearn\ShortUrl\Contracts\VisitEventQueueInterface;
 use SwooleLearn\ShortUrl\Entity\ShortUrlPage;
 use SwooleLearn\ShortUrl\Entity\ShortUrlRecord;
 use SwooleLearn\ShortUrl\Observability\InMemoryPrometheusCollector;
+use SwooleLearn\ShortUrl\Observability\LoggerInterface;
 use SwooleLearn\ShortUrl\Service\ShortUrlVisitLogWorker;
 
 final class ShortUrlVisitLogWorkerTest extends TestCase
@@ -150,6 +151,57 @@ final class ShortUrlVisitLogWorkerTest extends TestCase
         self::assertStringContainsString('shorturl_worker_retry_total{result="queued"} 1', $dump);
         self::assertStringContainsString('shorturl_worker_acks_total 1', $dump);
         self::assertStringContainsString('shorturl_worker_process_duration_seconds_bucket', $dump);
+    }
+
+    public function test_worker_logger_records_retry_and_dead_letter_context(): void
+    {
+        $queue = new WorkerQueueDouble();
+        $repository = new WorkerRepositoryDouble(throwOnBatch: true, throwOnSingle: true);
+        $logger = new WorkerCollectingLogger();
+
+        $queue->push([
+            'short_url_code' => 'code-dead',
+            'visited_at' => '2026-04-14T10:10:10+00:00',
+            'client_ip' => '127.0.0.1',
+            'user_agent' => 'phpunit',
+            'event_key' => 'event-key-dead',
+            'attempt' => 5,
+        ]);
+
+        $worker = new ShortUrlVisitLogWorker($queue, $repository, maxAttempts: 5, logger: $logger);
+        $worker->processOnce();
+
+        self::assertNotEmpty($logger->records);
+        $hasDeadLetterLog = false;
+        foreach ($logger->records as $record) {
+            if ($record['message'] === 'Visit log event moved to dead letter queue') {
+                $hasDeadLetterLog = true;
+                self::assertSame('code-dead', $record['context']['short_url_code'] ?? null);
+                self::assertSame('event-key-dead', $record['context']['event_key'] ?? null);
+            }
+        }
+        self::assertTrue($hasDeadLetterLog);
+    }
+}
+
+final class WorkerCollectingLogger implements LoggerInterface
+{
+    /** @var list<array{level: string, message: string, context: array<string, mixed>}> */
+    public array $records = [];
+
+    public function info(string $message, array $context = []): void
+    {
+        $this->records[] = ['level' => 'info', 'message' => $message, 'context' => $context];
+    }
+
+    public function warning(string $message, array $context = []): void
+    {
+        $this->records[] = ['level' => 'warning', 'message' => $message, 'context' => $context];
+    }
+
+    public function error(string $message, array $context = []): void
+    {
+        $this->records[] = ['level' => 'error', 'message' => $message, 'context' => $context];
     }
 }
 

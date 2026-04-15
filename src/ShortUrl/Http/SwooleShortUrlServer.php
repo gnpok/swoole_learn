@@ -38,7 +38,9 @@ final class SwooleShortUrlServer
             $headers = $this->normalizeHeaders($rawHeaders);
             $userAgent = (string) ($headers['user-agent'] ?? '');
             $body = $this->extractJsonBody($request, $method);
-            $traceId = $headers['x-trace-id'] ?? $this->newTraceId();
+            $traceId = $headers['x-trace-id']
+                ?? TraceContext::extractTraceIdFromTraceparent($headers['traceparent'] ?? '')
+                ?? $this->newTraceId();
 
             $apiResponse = $this->controller->handle(
                 new RequestContext(

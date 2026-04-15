@@ -61,4 +61,18 @@ final class ObservabilityTest extends TestCase
         self::assertStringContainsString('# unit_test_snapshot', $contents);
         self::assertStringContainsString('shorturl_http_requests_total{method="GET",route="metrics",status_code="200"} 1', $contents);
     }
+
+    public function test_trace_context_extracts_trace_id_from_valid_traceparent(): void
+    {
+        $traceId = \SwooleLearn\ShortUrl\Http\TraceContext::extractTraceIdFromTraceparent(
+            '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'
+        );
+        self::assertSame('4bf92f3577b34da6a3ce929d0e0e4736', $traceId);
+    }
+
+    public function test_trace_context_returns_null_for_invalid_traceparent(): void
+    {
+        $traceId = \SwooleLearn\ShortUrl\Http\TraceContext::extractTraceIdFromTraceparent('invalid-header');
+        self::assertNull($traceId);
+    }
 }

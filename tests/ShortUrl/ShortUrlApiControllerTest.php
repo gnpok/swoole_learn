@@ -105,8 +105,11 @@ final class ShortUrlApiControllerTest extends TestCase
     {
         $controller = $this->newController();
         $response = $controller->handle(new RequestContext('GET', '/api/v1/unknown'));
+        $payload = json_decode($response->body, true);
 
         self::assertSame(404, $response->statusCode);
+        self::assertSame('ROUTE_NOT_FOUND', $payload['error']['code'] ?? null);
+        self::assertArrayHasKey('trace_id', $payload['error'] ?? []);
     }
 
     public function test_create_with_idempotency_key_returns_same_short_code(): void
@@ -184,8 +187,10 @@ final class ShortUrlApiControllerTest extends TestCase
             method: 'GET',
             path: '/api/v1/admin/short-urls'
         ));
+        $payload = json_decode($response->body, true);
 
         self::assertSame(401, $response->statusCode);
+        self::assertSame('UNAUTHORIZED', $payload['error']['code'] ?? null);
     }
 
     public function test_admin_endpoint_accepts_rotated_api_key_from_env_list(): void
@@ -223,6 +228,7 @@ final class ShortUrlApiControllerTest extends TestCase
 
         self::assertSame(200, $response->statusCode);
         self::assertStringContainsString('shorturl_http_requests_total', $response->body);
+        self::assertStringContainsString('error_class="4xx"', $response->body);
         self::assertSame('text/plain; version=0.0.4; charset=utf-8', $response->headers['Content-Type'] ?? null);
         self::assertSame('trace-metrics', $response->headers['X-Trace-Id'] ?? null);
     }
@@ -261,6 +267,23 @@ final class ShortUrlApiControllerTest extends TestCase
         self::assertNotEmpty($logger->records);
         self::assertSame('trace-log', $logger->records[0]['context']['trace_id'] ?? null);
         self::assertSame('GET', $logger->records[0]['context']['method'] ?? null);
+    }
+
+    public function test_traceparent_is_used_for_trace_id_when_x_trace_id_missing(): void
+    {
+        $controller = $this->newController();
+        $traceparent = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01';
+
+        $response = $controller->handle(new RequestContext(
+            method: 'GET',
+            path: '/api/v1/unknown',
+            headers: ['traceparent' => $traceparent]
+        ));
+        $payload = json_decode($response->body, true);
+
+        self::assertSame(404, $response->statusCode);
+        self::assertSame('4bf92f3577b34da6a3ce929d0e0e4736', $response->headers['X-Trace-Id'] ?? null);
+        self::assertSame('4bf92f3577b34da6a3ce929d0e0e4736', $payload['error']['trace_id'] ?? null);
     }
 
     private function newController(

@@ -40,6 +40,14 @@ final class ShortUrlVisitLogWorker
                 minIdleMs: max(1, $reclaimIdleMs),
                 count: max(1, $reclaimCount)
             );
+            if ($events !== []) {
+                $metrics->incrementCounter(
+                    name: 'shorturl_worker_reclaimed_total',
+                    value: (float) count($events),
+                    labels: ['source' => 'pending'],
+                    help: 'Messages reclaimed from pending entries list.'
+                );
+            }
         }
         if ($events === []) {
             $metrics->incrementCounter(

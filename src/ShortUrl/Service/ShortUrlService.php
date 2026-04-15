@@ -15,7 +15,7 @@ use SwooleLearn\ShortUrl\Contracts\StatsStoreInterface;
 use SwooleLearn\ShortUrl\Contracts\VisitEventQueueInterface;
 use SwooleLearn\ShortUrl\Entity\ShortUrlListItem;
 use SwooleLearn\ShortUrl\Entity\ShortUrlRecord;
-use SwooleLearn\ShortUrl\Exception\ConflictException;
+use SwooleLearn\ShortUrl\Exception\ConflictShortCodeException;
 use SwooleLearn\ShortUrl\Exception\InactiveShortUrlException;
 use SwooleLearn\ShortUrl\Exception\NotFoundException;
 use SwooleLearn\ShortUrl\Exception\RateLimitException;
@@ -368,7 +368,7 @@ final class ShortUrlService
         $code = $this->normalizeCode($customCode);
 
         if ($this->repository->existsByCode($code)) {
-            throw new ConflictException(sprintf('Code "%s" already exists.', $code));
+            throw new ConflictShortCodeException(sprintf('Code "%s" already exists.', $code));
         }
 
         return $code;
@@ -383,7 +383,7 @@ final class ShortUrlService
             }
         }
 
-        throw new ConflictException('Unable to allocate short code after multiple attempts.');
+        throw new ConflictShortCodeException('Unable to allocate short code after multiple attempts.');
     }
 
     private function normalizeCode(string $code): string

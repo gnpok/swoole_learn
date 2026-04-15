@@ -16,6 +16,8 @@ final class OpenApiSpecContractTest extends TestCase
         self::assertArrayHasKey('/api/v1/short-urls', $spec['paths'] ?? []);
         self::assertArrayHasKey('/api/v1/admin/short-urls', $spec['paths'] ?? []);
         self::assertArrayHasKey('/api/v1/admin/short-urls/bulk-disable', $spec['paths'] ?? []);
+        self::assertArrayHasKey('/metrics', $spec['paths'] ?? []);
+        self::assertArrayHasKey('/readyz', $spec['paths'] ?? []);
 
         $securitySchemes = $spec['components']['securitySchemes'] ?? [];
         self::assertArrayHasKey('AdminApiKey', $securitySchemes);
@@ -44,6 +46,17 @@ final class OpenApiSpecContractTest extends TestCase
         self::assertArrayHasKey('per_page', $schema);
         self::assertArrayHasKey('total', $schema);
         self::assertSame('array', $schema['items']['type'] ?? null);
+    }
+
+    public function test_openapi_spec_error_schema_contains_trace_and_code(): void
+    {
+        $spec = $this->loadSpec();
+        $errorSchema = $spec['components']['schemas']['ErrorResponse']['properties']['error']['properties'] ?? [];
+
+        self::assertArrayHasKey('code', $errorSchema);
+        self::assertArrayHasKey('message', $errorSchema);
+        self::assertArrayHasKey('trace_id', $errorSchema);
+        self::assertSame('string', $errorSchema['trace_id']['type'] ?? null);
     }
 
     /**
