@@ -1,0 +1,449 @@
+<?php
+
+declare(strict_types=1);
+
+namespace SwooleLearn\Tests\ShortUrl;
+
+use DateTimeImmutable;
+use PHPUnit\Framework\TestCase;
+use SwooleLearn\ShortUrl\Contracts\IdempotencyStoreInterface;
+use SwooleLearn\ShortUrl\Contracts\RateLimiterInterface;
+use SwooleLearn\ShortUrl\Contracts\ShortCodeGeneratorInterface;
+use SwooleLearn\ShortUrl\Contracts\ShortUrlCacheInterface;
+use SwooleLearn\ShortUrl\Contracts\ShortUrlRepositoryInterface;
+use SwooleLearn\ShortUrl\Contracts\StatsStoreInterface;
+use SwooleLearn\ShortUrl\Contracts\VisitEventQueueInterface;
+use SwooleLearn\ShortUrl\Entity\ShortUrlListItem;
+use SwooleLearn\ShortUrl\Entity\ShortUrlPage;
+use SwooleLearn\ShortUrl\Entity\ShortUrlRecord;
+use SwooleLearn\ShortUrl\Http\RequestContext;
+use SwooleLearn\ShortUrl\Http\ShortUrlApiController;
+use SwooleLearn\ShortUrl\Service\ShortUrlService;
+
+final class ShortUrlApiControllerTest extends TestCase
+{
+    public function test_create_endpoint_returns_201_with_payload(): void
+    {
+        $controller = $this->newController();
+        $response = $controller->handle(new RequestContext(
+            method: 'POST',
+            path: '/api/v1/short-urls',
+            body: ['url' => 'https://example.com/tutorial'],
+            clientIp: '127.0.0.1'
+        ));
+
+        self::assertSame(201, $response->statusCode);
+        $decoded = json_decode($response->body, true);
+
+        self::assertIsArray($decoded);
+        self::assertSame('https://example.com/tutorial', $decoded['data']['original_url'] ?? null);
+        self::assertArrayHasKey('short_url', $decoded['data']);
+    }
+
+    public function test_create_endpoint_rejects_invalid_json_marker(): void
+    {
+        $controller = $this->newController();
+        $response = $controller->handle(new RequestContext(
+            method: 'POST',
+            path: '/api/v1/short-urls',
+            body: ['__invalid_json__' => true],
+            clientIp: '127.0.0.1'
+        ));
+
+        self::assertSame(422, $response->statusCode);
+    }
+
+    public function test_redirect_endpoint_returns_location_header(): void
+    {
+        $controller = $this->newController();
+        $createResponse = $controller->handle(new RequestContext(
+            method: 'POST',
+            path: '/api/v1/short-urls',
+            body: ['url' => 'https://example.com/redirect'],
+            clientIp: '127.0.0.1'
+        ));
+        $createPayload = json_decode($createResponse->body, true);
+        $code = (string) ($createPayload['data']['code'] ?? '');
+
+        $redirectResponse = $controller->handle(new RequestContext(
+            method: 'GET',
+            path: '/r/' . $code,
+            clientIp: '127.0.0.1',
+            userAgent: 'phpunit'
+        ));
+
+        self::assertSame(302, $redirectResponse->statusCode);
+        self::assertSame('https://example.com/redirect', $redirectResponse->headers['Location'] ?? null);
+    }
+
+    public function test_detail_endpoint_returns_data_when_code_exists(): void
+    {
+        $controller = $this->newController();
+        $createResponse = $controller->handle(new RequestContext(
+            method: 'POST',
+            path: '/api/v1/short-urls',
+            body: ['url' => 'https://example.com/detail'],
+            clientIp: '127.0.0.1'
+        ));
+        $createPayload = json_decode($createResponse->body, true);
+        $code = (string) ($createPayload['data']['code'] ?? '');
+
+        $detailResponse = $controller->handle(new RequestContext(
+            method: 'GET',
+            path: '/api/v1/short-urls/' . $code
+        ));
+        $detailPayload = json_decode($detailResponse->body, true);
+
+        self::assertSame(200, $detailResponse->statusCode);
+        self::assertSame($code, $detailPayload['data']['code'] ?? null);
+    }
+
+    public function test_unknown_route_returns_404(): void
+    {
+        $controller = $this->newController();
+        $response = $controller->handle(new RequestContext('GET', '/api/v1/unknown'));
+
+        self::assertSame(404, $response->statusCode);
+    }
+
+    public function test_create_with_idempotency_key_returns_same_short_code(): void
+    {
+        $controller = $this->newController();
+        $context = new RequestContext(
+            method: 'POST',
+            path: '/api/v1/short-urls',
+            body: ['url' => 'https://example.com/idem-api'],
+            clientIp: '127.0.0.1',
+            headers: ['idempotency-key' => 'idem-key-1']
+        );
+
+        $first = $controller->handle($context);
+        $second = $controller->handle($context);
+
+        $firstPayload = json_decode($first->body, true);
+        $secondPayload = json_decode($second->body, true);
+
+        self::assertSame(201, $first->statusCode);
+        self::assertSame(201, $second->statusCode);
+        self::assertSame($firstPayload['data']['code'], $secondPayload['data']['code']);
+    }
+
+    public function test_admin_list_and_bulk_disable_endpoints(): void
+    {
+        $controller = $this->newController();
+
+        $firstCreate = $controller->handle(new RequestContext(
+            method: 'POST',
+            path: '/api/v1/short-urls',
+            body: ['url' => 'https://example.com/admin-1'],
+            clientIp: '127.0.0.1'
+        ));
+        $secondCreate = $controller->handle(new RequestContext(
+            method: 'POST',
+            path: '/api/v1/short-urls',
+            body: ['url' => 'https://example.com/admin-2'],
+            clientIp: '127.0.0.1'
+        ));
+
+        $firstCode = (string) ((json_decode($firstCreate->body, true)['data']['code']) ?? '');
+        $secondCode = (string) ((json_decode($secondCreate->body, true)['data']['code']) ?? '');
+
+        $listResponse = $controller->handle(new RequestContext(
+            method: 'GET',
+            path: '/api/v1/admin/short-urls',
+            query: ['page' => 1, 'per_page' => 10, 'keyword' => 'admin']
+        ));
+        $listPayload = json_decode($listResponse->body, true);
+
+        self::assertSame(200, $listResponse->statusCode);
+        self::assertGreaterThanOrEqual(2, $listPayload['data']['total'] ?? 0);
+
+        $bulkResponse = $controller->handle(new RequestContext(
+            method: 'POST',
+            path: '/api/v1/admin/short-urls/bulk-disable',
+            body: ['codes' => [$firstCode, $secondCode, 'nope1234']]
+        ));
+        $bulkPayload = json_decode($bulkResponse->body, true);
+
+        self::assertSame(200, $bulkResponse->statusCode);
+        self::assertSame(3, $bulkPayload['data']['requested'] ?? null);
+        self::assertSame(2, $bulkPayload['data']['disabled'] ?? null);
+        self::assertSame(['nope1234'], $bulkPayload['data']['missing'] ?? null);
+    }
+
+    private function newController(): ShortUrlApiController
+    {
+        $service = new ShortUrlService(
+            repository: new ControllerFakeRepository(),
+            cache: new ControllerFakeCache(),
+            statsStore: new ControllerFakeStatsStore(),
+            rateLimiter: new ControllerFakeRateLimiter(),
+            codeGenerator: new ControllerFakeCodeGenerator(['qwerty1', 'qwerty2', 'qwerty3']),
+            idempotencyStore: new ControllerFakeIdempotencyStore(),
+            visitEventQueue: new ControllerFakeVisitEventQueue(),
+            publicBaseUrl: 'http://127.0.0.1:9501'
+        );
+
+        return new ShortUrlApiController($service);
+    }
+}
+
+final class ControllerFakeRepository implements ShortUrlRepositoryInterface
+{
+    /** @var array<string, ShortUrlRecord> */
+    private array $records = [];
+
+    private int $nextId = 1;
+
+    public function save(ShortUrlRecord $record): ShortUrlRecord
+    {
+        $saved = new ShortUrlRecord(
+            id: $this->nextId++,
+            code: $record->code,
+            originalUrl: $record->originalUrl,
+            createdAt: $record->createdAt,
+            expiresAt: $record->expiresAt,
+            isActive: $record->isActive,
+            totalVisits: $record->totalVisits,
+            lastVisitedAt: $record->lastVisitedAt
+        );
+        $this->records[$saved->code] = $saved;
+
+        return $saved;
+    }
+
+    public function findByCode(string $code): ?ShortUrlRecord
+    {
+        return $this->records[$code] ?? null;
+    }
+
+    public function existsByCode(string $code): bool
+    {
+        return isset($this->records[$code]);
+    }
+
+    public function incrementVisits(string $code, DateTimeImmutable $visitedAt): void
+    {
+        $record = $this->records[$code] ?? null;
+        if ($record === null) {
+            return;
+        }
+
+        $this->records[$code] = new ShortUrlRecord(
+            id: $record->id,
+            code: $record->code,
+            originalUrl: $record->originalUrl,
+            createdAt: $record->createdAt,
+            expiresAt: $record->expiresAt,
+            isActive: $record->isActive,
+            totalVisits: $record->totalVisits + 1,
+            lastVisitedAt: $visitedAt
+        );
+    }
+
+    public function appendVisitLog(string $code, DateTimeImmutable $visitedAt, string $clientIp, string $userAgent): void
+    {
+    }
+
+    public function disable(string $code): bool
+    {
+        if (!isset($this->records[$code])) {
+            return false;
+        }
+
+        $record = $this->records[$code];
+        $this->records[$code] = new ShortUrlRecord(
+            id: $record->id,
+            code: $record->code,
+            originalUrl: $record->originalUrl,
+            createdAt: $record->createdAt,
+            expiresAt: $record->expiresAt,
+            isActive: false,
+            totalVisits: $record->totalVisits,
+            lastVisitedAt: $record->lastVisitedAt
+        );
+
+        return true;
+    }
+
+    public function paginate(int $page, int $pageSize, ?bool $isActive = null, ?string $keyword = null): ShortUrlPage
+    {
+        $items = array_values($this->records);
+        if ($isActive !== null) {
+            $items = array_values(array_filter($items, static fn (ShortUrlRecord $record): bool => $record->isActive === $isActive));
+        }
+        if ($keyword !== null && $keyword !== '') {
+            $items = array_values(array_filter(
+                $items,
+                static fn (ShortUrlRecord $record): bool => str_contains($record->code, $keyword)
+                    || str_contains($record->originalUrl, $keyword)
+            ));
+        }
+
+        $total = count($items);
+        $offset = max(0, ($page - 1) * $pageSize);
+        $slice = array_slice($items, $offset, $pageSize);
+
+        return new ShortUrlPage(
+            items: array_map(
+                static fn (ShortUrlRecord $record): ShortUrlListItem => new ShortUrlListItem(
+                    code: $record->code,
+                    originalUrl: $record->originalUrl,
+                    isActive: $record->isActive,
+                    expiresAt: $record->expiresAt,
+                    totalVisits: $record->totalVisits,
+                    lastVisitedAt: $record->lastVisitedAt,
+                    createdAt: $record->createdAt
+                ),
+                $slice
+            ),
+            page: $page,
+            perPage: $pageSize,
+            total: $total
+        );
+    }
+
+    public function bulkDisable(array $codes): array
+    {
+        $disabled = 0;
+        $missing = [];
+
+        foreach ($codes as $code) {
+            if (!isset($this->records[$code])) {
+                $missing[] = $code;
+                continue;
+            }
+
+            $record = $this->records[$code];
+            if ($record->isActive) {
+                $disabled++;
+            }
+            $this->records[$code] = new ShortUrlRecord(
+                id: $record->id,
+                code: $record->code,
+                originalUrl: $record->originalUrl,
+                createdAt: $record->createdAt,
+                expiresAt: $record->expiresAt,
+                isActive: false,
+                totalVisits: $record->totalVisits,
+                lastVisitedAt: $record->lastVisitedAt
+            );
+        }
+
+        return ['disabled' => $disabled, 'missing' => $missing];
+    }
+}
+
+final class ControllerFakeCache implements ShortUrlCacheInterface
+{
+    /** @var array<string, ShortUrlRecord> */
+    private array $records = [];
+
+    public function get(string $code): ?ShortUrlRecord
+    {
+        return $this->records[$code] ?? null;
+    }
+
+    public function put(ShortUrlRecord $record, int $ttlSeconds): void
+    {
+        $this->records[$record->code] = $record;
+    }
+
+    public function forget(string $code): void
+    {
+        unset($this->records[$code]);
+    }
+}
+
+final class ControllerFakeStatsStore implements StatsStoreInterface
+{
+    /** @var array<string, int> */
+    private array $counter = [];
+
+    public function increment(string $code): int
+    {
+        $this->counter[$code] = ($this->counter[$code] ?? 0) + 1;
+
+        return $this->counter[$code];
+    }
+
+    public function getTotal(string $code): int
+    {
+        return $this->counter[$code] ?? 0;
+    }
+
+    public function addRecentVisit(string $code, array $visit, int $maxItems = 20): void
+    {
+    }
+
+    public function getRecentVisits(string $code, int $limit = 20): array
+    {
+        return [];
+    }
+}
+
+final class ControllerFakeRateLimiter implements RateLimiterInterface
+{
+    public function hit(string $key, int $windowSeconds): int
+    {
+        return 1;
+    }
+}
+
+final class ControllerFakeCodeGenerator implements ShortCodeGeneratorInterface
+{
+    /** @var list<string> */
+    private array $codes;
+
+    /**
+     * @param list<string> $codes
+     */
+    public function __construct(array $codes)
+    {
+        $this->codes = $codes;
+    }
+
+    public function generate(int $length = 7): string
+    {
+        return array_shift($this->codes) ?? 'fallback1';
+    }
+}
+
+final class ControllerFakeIdempotencyStore implements IdempotencyStoreInterface
+{
+    /** @var array<string, string> */
+    private array $store = [];
+
+    public function claim(string $key, string $value, int $ttlSeconds): bool
+    {
+        if (isset($this->store[$key])) {
+            return false;
+        }
+
+        $this->store[$key] = $value;
+
+        return true;
+    }
+
+    public function get(string $key): ?string
+    {
+        return $this->store[$key] ?? null;
+    }
+}
+
+final class ControllerFakeVisitEventQueue implements VisitEventQueueInterface
+{
+    public function push(array $event): string
+    {
+        return '1-0';
+    }
+
+    public function consume(int $count = 100, int $blockMs = 1000): array
+    {
+        return [];
+    }
+
+    public function ack(array $messageIds): void
+    {
+    }
+}
