@@ -180,6 +180,48 @@ final class RedisVisitEventQueue implements VisitEventQueueInterface
         ]);
     }
 
+    public function reclaim(int $minIdleMs = 60000, int $count = 100): array
+    {
+        $this->ensureConsumerGroup();
+        $safeIdle = max(1, $minIdleMs);
+        $safeCount = max(1, $count);
+
+        $response = $this->redis->xautoclaim(
+            $this->stream,
+            $this->consumerGroup,
+            $this->consumerName,
+            $safeIdle,
+            '0-0',
+            $safeCount
+        );
+
+        if (!is_array($response) || !isset($response[1]) || !is_array($response[1])) {
+            return [];
+        }
+
+        $entries = $response[1];
+        $result = [];
+        foreach ($entries as $id => $values) {
+            if (!is_string($id) || !is_array($values)) {
+                continue;
+            }
+
+            $result[] = [
+                'id' => $id,
+                'values' => [
+                    'short_url_code' => (string) ($values['short_url_code'] ?? ''),
+                    'visited_at' => (string) ($values['visited_at'] ?? ''),
+                    'client_ip' => (string) ($values['client_ip'] ?? ''),
+                    'user_agent' => (string) ($values['user_agent'] ?? ''),
+                    'event_key' => (string) ($values['event_key'] ?? ''),
+                    'attempt' => max(1, (int) ($values['attempt'] ?? 1)),
+                ],
+            ];
+        }
+
+        return $result;
+    }
+
     private function ensureConsumerGroup(): void
     {
         try {

@@ -168,7 +168,7 @@ final class WorkerQueueDouble implements VisitEventQueueInterface
         return array_splice($this->entries, 0, $count);
     }
 
-    public function reclaimPending(int $count = 100, int $minIdleMs = 60000): array
+    public function reclaim(int $minIdleMs = 60000, int $count = 100): array
     {
         $this->autoClaimCalled = true;
 

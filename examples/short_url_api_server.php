@@ -43,9 +43,12 @@ $service = new ShortUrlService(
     publicBaseUrl: getenv('PUBLIC_BASE_URL') ?: 'http://127.0.0.1:9501'
 );
 
+$adminApiKeys = getenv('ADMIN_API_KEYS') ?: '';
 $controller = new ShortUrlApiController(
     $service,
-    getenv('ADMIN_API_KEY') ?: null
+    $adminApiKeys !== ''
+        ? $adminApiKeys
+        : (getenv('ADMIN_API_KEY') ?: null)
 );
 $server = new SwooleShortUrlServer(
     new SwooleHttpServerRuntime(

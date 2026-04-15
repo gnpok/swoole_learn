@@ -18,11 +18,19 @@ final class ShortUrlVisitLogWorker
     ) {
     }
 
-    public function processOnce(int $batchSize = 100, int $blockMs = 1000): int
+    public function processOnce(
+        int $batchSize = 100,
+        int $blockMs = 1000,
+        int $reclaimIdleMs = 60000,
+        int $reclaimCount = 100
+    ): int
     {
         $events = $this->queue->consume($batchSize, $blockMs);
         if ($events === []) {
-            $events = $this->queue->reclaim(60000, $batchSize);
+            $events = $this->queue->reclaim(
+                minIdleMs: max(1, $reclaimIdleMs),
+                count: max(1, $reclaimCount)
+            );
         }
         if ($events === []) {
             return 0;

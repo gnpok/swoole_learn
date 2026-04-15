@@ -672,7 +672,7 @@ final class FakeVisitEventQueue implements VisitEventQueueInterface
         return array_splice($this->consumable, 0, $count);
     }
 
-    public function autoClaim(int $count = 100, int $minIdleMs = 60000): array
+    public function reclaim(int $minIdleMs = 60000, int $count = 100): array
     {
         return [];
     }

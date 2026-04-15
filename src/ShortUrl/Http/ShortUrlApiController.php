@@ -203,14 +203,46 @@ final class ShortUrlApiController
 
     private function assertAdminAuthorized(RequestContext $context): void
     {
-        $expected = $this->adminApiKey;
-        if ($expected === null || trim($expected) === '') {
+        $allowedKeys = $this->resolveAllowedAdminKeys();
+        if ($allowedKeys === []) {
             return;
         }
 
-        $provided = $context->headers['x-admin-api-key'] ?? '';
-        if (!is_string($provided) || $provided === '' || !hash_equals($expected, $provided)) {
+        $provided = $context->headers['x-admin-api-key'] ?? null;
+        if (!is_string($provided) || $provided === '') {
             throw new UnauthorizedException('Invalid admin API key.');
         }
+
+        foreach ($allowedKeys as $allowedKey) {
+            if (hash_equals($allowedKey, $provided)) {
+                return;
+            }
+        }
+
+        throw new UnauthorizedException('Invalid admin API key.');
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function resolveAllowedAdminKeys(): array
+    {
+        $envKeysRaw = getenv('ADMIN_API_KEYS');
+        if (is_string($envKeysRaw) && trim($envKeysRaw) !== '') {
+            $keys = array_values(array_filter(array_map(
+                static fn (string $key): string => trim($key),
+                explode(',', $envKeysRaw)
+            ), static fn (string $key): bool => $key !== ''));
+
+            if ($keys !== []) {
+                return $keys;
+            }
+        }
+
+        if ($this->adminApiKey === null || trim($this->adminApiKey) === '') {
+            return [];
+        }
+
+        return [trim($this->adminApiKey)];
     }
 }

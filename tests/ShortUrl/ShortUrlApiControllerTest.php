@@ -189,7 +189,7 @@ final class ShortUrlApiControllerTest extends TestCase
     {
         putenv('ADMIN_API_KEYS=old-key,new-key');
 
-        $controller = $this->newController();
+        $controller = $this->newController(null);
         $response = $controller->handle(new RequestContext(
             method: 'GET',
             path: '/api/v1/admin/short-urls',
@@ -199,7 +199,7 @@ final class ShortUrlApiControllerTest extends TestCase
         self::assertSame(200, $response->statusCode);
     }
 
-    private function newController(): ShortUrlApiController
+    private function newController(?string $adminApiKey = 'test-admin-key'): ShortUrlApiController
     {
         $service = new ShortUrlService(
             repository: new ControllerFakeRepository(),
@@ -212,7 +212,7 @@ final class ShortUrlApiControllerTest extends TestCase
             publicBaseUrl: 'http://127.0.0.1:9501'
         );
 
-        return new ShortUrlApiController($service, 'test-admin-key');
+        return new ShortUrlApiController($service, $adminApiKey);
     }
 }
 
@@ -472,6 +472,11 @@ final class ControllerFakeVisitEventQueue implements VisitEventQueueInterface
     }
 
     public function consume(int $count = 100, int $blockMs = 1000): array
+    {
+        return [];
+    }
+
+    public function reclaim(int $minIdleMs = 60000, int $count = 100): array
     {
         return [];
     }
