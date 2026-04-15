@@ -21,13 +21,15 @@ $redis = new Client([
 $queue = new RedisVisitEventQueue(
     redis: $redis,
     stream: getenv('REDIS_VISIT_STREAM') ?: 'shorturl:visit:stream',
+    deadLetterStream: getenv('REDIS_VISIT_DLQ_STREAM') ?: 'shorturl:visit:stream:dlq',
     consumerGroup: getenv('VISIT_LOG_CONSUMER_GROUP') ?: 'visit-log-workers',
     consumerName: getenv('VISIT_LOG_CONSUMER_NAME') ?: 'worker-1'
 );
 
 $worker = new ShortUrlVisitLogWorker(
     queue: $queue,
-    repository: new PdoShortUrlRepository(PdoFactory::fromEnv())
+    repository: new PdoShortUrlRepository(PdoFactory::fromEnv()),
+    maxAttempts: (int) (getenv('VISIT_LOG_MAX_ATTEMPTS') ?: 5)
 );
 
 $batchSize = (int) (getenv('VISIT_LOG_BATCH_SIZE') ?: 100);

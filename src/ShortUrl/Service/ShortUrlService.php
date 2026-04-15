@@ -133,11 +133,14 @@ final class ShortUrlService
         }
 
         $this->repository->incrementVisits($record->code, $now);
+        $eventKey = $this->buildVisitEventKey($record->code, $now, $clientIp, $userAgent);
         $visitPayload = [
             'short_url_code' => $record->code,
             'visited_at' => $now->format(DATE_ATOM),
             'client_ip' => $clientIp,
             'user_agent' => $userAgent,
+            'event_key' => $eventKey,
+            'attempt' => 1,
         ];
         $this->visitEventQueue->push($visitPayload);
         $this->statsStore->increment($record->code);
@@ -359,5 +362,17 @@ final class ShortUrlService
         }
 
         return min(self::CACHE_TTL_SECONDS, $ttl);
+    }
+
+    private function buildVisitEventKey(
+        string $code,
+        DateTimeImmutable $visitedAt,
+        string $clientIp,
+        string $userAgent
+    ): string {
+        return hash(
+            'sha256',
+            implode('|', [$code, $visitedAt->format(DATE_ATOM), $clientIp, $userAgent])
+        );
     }
 }

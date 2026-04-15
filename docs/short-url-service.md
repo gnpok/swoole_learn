@@ -15,6 +15,8 @@
 - 创建接口支持幂等（`Idempotency-Key`）
 - 访问日志异步化（Redis Stream + Worker）
 - 提供后台管理接口（分页筛选、批量禁用）
+- 管理端接口 API Key 鉴权（`X-Admin-Api-Key`）
+- 访问日志支持批量落库、重试、死信队列（DLQ）
 
 ---
 
@@ -90,6 +92,8 @@ Base URL 示例：`http://127.0.0.1:9501`
 #### 2.6 后台分页查询
 
 - **GET** `/api/v1/admin/short-urls`
+- Header：
+  - `X-Admin-Api-Key: <admin-key>`
 - Query：
   - `page`：默认 1
   - `per_page`：默认 20，最大 100
@@ -123,6 +127,8 @@ Base URL 示例：`http://127.0.0.1:9501`
 #### 2.7 后台批量禁用
 
 - **POST** `/api/v1/admin/short-urls/bulk-disable`
+- Header：
+  - `X-Admin-Api-Key: <admin-key>`
 - Request JSON：
 
 ```json
@@ -166,6 +172,7 @@ SQL 文件：`database/mysql/short_url_schema.sql`
 作用：存储明细访问记录，可用于审计、分析、报表。
 
 核心字段：
+- `event_key`（幂等键，唯一索引）
 - `short_url_code`
 - `visited_at`
 - `client_ip`
@@ -243,10 +250,13 @@ SQL 文件：`database/mysql/short_url_schema.sql`
 - `visited_at`
 - `client_ip`
 - `user_agent`
+- `event_key`
+- `attempt`
 
 说明：
 - API 请求只入队，不同步写 `short_url_visits`
-- Worker 异步消费并入库
+- Worker 优先批量落库，失败自动降级单条写入
+- 单条写入失败会重试，超过阈值进入 DLQ（`shorturl:visit:stream:dlq`）
 
 ---
 
@@ -285,6 +295,9 @@ export MYSQL_PASSWORD=root
 export REDIS_HOST=127.0.0.1
 export REDIS_PORT=6379
 export REDIS_DATABASE=0
+export REDIS_VISIT_STREAM=shorturl:visit:stream
+export REDIS_VISIT_DLQ_STREAM=shorturl:visit:stream:dlq
+export ADMIN_API_KEY=replace-with-strong-key
 ```
 
 启动：
@@ -327,5 +340,8 @@ php examples/short_url_visit_log_worker.php
 - 幂等创建（重复请求返回同一短码）
 - 后台管理接口（分页筛选、批量禁用）
 - 访问日志 Worker（消费、ack、异常容错）
+- 访问日志 Worker（批量失败降级、重试、死信）
 - API 控制器（状态码、JSON、路由分发）
+
+附：OpenAPI 规范文件位于 `docs/openapi-short-url.yaml`。
 

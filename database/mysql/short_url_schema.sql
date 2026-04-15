@@ -22,12 +22,14 @@ CREATE TABLE IF NOT EXISTS short_urls (
 
 CREATE TABLE IF NOT EXISTS short_url_visits (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+    event_key CHAR(64) NOT NULL COMMENT '访问事件幂等键（sha256）',
     short_url_code VARCHAR(16) NOT NULL COMMENT '短码（逻辑外键）',
     visited_at DATETIME NOT NULL COMMENT '访问时间',
     client_ip VARCHAR(45) NOT NULL COMMENT '客户端 IP（支持 IPv6）',
     user_agent VARCHAR(255) NOT NULL DEFAULT '' COMMENT 'User-Agent 截断保存',
     referer VARCHAR(255) NOT NULL DEFAULT '' COMMENT '来源页面，可选',
     PRIMARY KEY (id),
+    UNIQUE KEY uk_short_url_visits_event_key (event_key),
     KEY idx_short_url_visits_code_time (short_url_code, visited_at),
     KEY idx_short_url_visits_visited_at (visited_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='短链接访问日志';

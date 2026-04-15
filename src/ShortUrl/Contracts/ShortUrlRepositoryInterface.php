@@ -20,6 +20,17 @@ interface ShortUrlRepositoryInterface
 
     public function appendVisitLog(string $code, DateTimeImmutable $visitedAt, string $clientIp, string $userAgent): void;
 
+    /**
+     * @param list<array{
+     *   code: string,
+     *   visited_at: DateTimeImmutable,
+     *   client_ip: string,
+     *   user_agent: string,
+     *   event_key: string
+     * }> $logs
+     */
+    public function appendVisitLogsBatch(array $logs): int;
+
     public function disable(string $code): bool;
 
     public function paginate(int $page, int $pageSize, ?bool $isActive = null, ?string $keyword = null): ShortUrlPage;

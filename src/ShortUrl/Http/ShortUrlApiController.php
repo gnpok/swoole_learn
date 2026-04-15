@@ -9,13 +9,17 @@ use SwooleLearn\ShortUrl\Exception\ConflictException;
 use SwooleLearn\ShortUrl\Exception\InactiveShortUrlException;
 use SwooleLearn\ShortUrl\Exception\NotFoundException;
 use SwooleLearn\ShortUrl\Exception\RateLimitException;
+use SwooleLearn\ShortUrl\Exception\UnauthorizedException;
 use SwooleLearn\ShortUrl\Exception\ValidationException;
 use SwooleLearn\ShortUrl\Service\ShortUrlService;
 use Throwable;
 
 final class ShortUrlApiController
 {
-    public function __construct(private readonly ShortUrlService $service)
+    public function __construct(
+        private readonly ShortUrlService $service,
+        private readonly ?string $adminApiKey = null
+    )
     {
     }
 
@@ -62,11 +66,11 @@ final class ShortUrlApiController
             }
 
             if ($context->method === 'GET' && $context->path === '/api/v1/admin/short-urls') {
-                return $this->listShortUrls($query);
+                return $this->listShortUrls($query, $context);
             }
 
             if ($context->method === 'POST' && $context->path === '/api/v1/admin/short-urls/bulk-disable') {
-                return $this->bulkDisable($body);
+                return $this->bulkDisable($body, $context);
             }
 
             return ApiResponse::json(404, ['error' => 'Route not found.']);
@@ -76,6 +80,8 @@ final class ShortUrlApiController
             return ApiResponse::json(409, ['error' => $exception->getMessage()]);
         } catch (RateLimitException $exception) {
             return ApiResponse::json(429, ['error' => $exception->getMessage()]);
+        } catch (UnauthorizedException $exception) {
+            return ApiResponse::json(401, ['error' => $exception->getMessage()]);
         } catch (NotFoundException $exception) {
             return ApiResponse::json(404, ['error' => $exception->getMessage()]);
         } catch (InactiveShortUrlException $exception) {
@@ -154,8 +160,9 @@ final class ShortUrlApiController
     /**
      * @param array<string, mixed> $query
      */
-    private function listShortUrls(array $query): ApiResponse
+    private function listShortUrls(array $query, RequestContext $context): ApiResponse
     {
+        $this->assertAdminAuthorized($context);
         $page = isset($query['page']) ? (int) $query['page'] : 1;
         $perPage = isset($query['per_page']) ? (int) $query['per_page'] : 20;
         $keyword = isset($query['keyword']) ? (string) $query['keyword'] : null;
@@ -180,8 +187,9 @@ final class ShortUrlApiController
     /**
      * @param array<string, mixed>|null $body
      */
-    private function bulkDisable(?array $body): ApiResponse
+    private function bulkDisable(?array $body, RequestContext $context): ApiResponse
     {
+        $this->assertAdminAuthorized($context);
         if ($body === null || !isset($body['codes']) || !is_array($body['codes'])) {
             throw new ValidationException('codes must be an array.');
         }
@@ -191,5 +199,18 @@ final class ShortUrlApiController
         $result = $this->service->bulkDisable($codes);
 
         return ApiResponse::json(200, ['data' => $result]);
+    }
+
+    private function assertAdminAuthorized(RequestContext $context): void
+    {
+        $expected = $this->adminApiKey;
+        if ($expected === null || trim($expected) === '') {
+            return;
+        }
+
+        $provided = $context->headers['x-admin-api-key'] ?? '';
+        if (!is_string($provided) || $provided === '' || !hash_equals($expected, $provided)) {
+            throw new UnauthorizedException('Invalid admin API key.');
+        }
     }
 }
