@@ -10,9 +10,11 @@ use SwooleLearn\ShortUrl\Http\ShortUrlApiController;
 use SwooleLearn\ShortUrl\Http\SwooleShortUrlServer;
 use SwooleLearn\ShortUrl\Infrastructure\PdoFactory;
 use SwooleLearn\ShortUrl\Infrastructure\PdoShortUrlRepository;
+use SwooleLearn\ShortUrl\Infrastructure\RedisIdempotencyStore;
 use SwooleLearn\ShortUrl\Infrastructure\RedisRateLimiter;
 use SwooleLearn\ShortUrl\Infrastructure\RedisShortUrlCache;
 use SwooleLearn\ShortUrl\Infrastructure\RedisStatsStore;
+use SwooleLearn\ShortUrl\Infrastructure\RedisVisitEventQueue;
 use SwooleLearn\ShortUrl\Service\ShortUrlService;
 use SwooleLearn\ShortUrl\Support\Base62CodeGenerator;
 
@@ -30,6 +32,13 @@ $service = new ShortUrlService(
     statsStore: new RedisStatsStore($redis),
     rateLimiter: new RedisRateLimiter($redis),
     codeGenerator: new Base62CodeGenerator(),
+    idempotencyStore: new RedisIdempotencyStore($redis),
+    visitEventQueue: new RedisVisitEventQueue(
+        $redis,
+        stream: getenv('REDIS_VISIT_STREAM') ?: 'shorturl:visit:stream',
+        consumerGroup: getenv('REDIS_VISIT_CONSUMER_GROUP') ?: 'visit-log-workers',
+        consumerName: getenv('REDIS_VISIT_CONSUMER_NAME') ?: 'worker-api'
+    ),
     publicBaseUrl: getenv('PUBLIC_BASE_URL') ?: 'http://127.0.0.1:9501'
 );
 

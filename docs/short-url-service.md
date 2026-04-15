@@ -12,6 +12,9 @@
 - 禁用短链
 - 使用 Redis 做缓存、统计、限流
 - 使用 MySQL 做持久化与日志落库
+- 创建接口支持幂等（`Idempotency-Key`）
+- 访问日志异步化（Redis Stream + Worker）
+- 提供后台管理接口（分页筛选、批量禁用）
 
 ---
 
@@ -22,6 +25,8 @@ Base URL 示例：`http://127.0.0.1:9501`
 #### 2.1 创建短链
 
 - **POST** `/api/v1/short-urls`
+- Header（可选）：
+  - `Idempotency-Key: <unique-key>`：同一个 key 多次提交只创建一次，返回同一 short code
 - Request JSON:
 
 ```json
@@ -81,6 +86,62 @@ Base URL 示例：`http://127.0.0.1:9501`
 
 - **DELETE** `/api/v1/short-urls/{code}`
 - 成功返回 `204`
+
+#### 2.6 后台分页查询
+
+- **GET** `/api/v1/admin/short-urls`
+- Query：
+  - `page`：默认 1
+  - `per_page`：默认 20，最大 100
+  - `keyword`：按 `code/original_url` 模糊检索
+  - `is_active`：`true/false/1/0`
+
+响应（200）：
+
+```json
+{
+  "data": {
+    "items": [
+      {
+        "code": "learn01",
+        "short_url": "http://127.0.0.1:9501/r/learn01",
+        "original_url": "https://example.com/article/123",
+        "is_active": true,
+        "total_visits": 15,
+        "created_at": "2026-04-14T11:00:00+00:00",
+        "expires_at": null,
+        "last_visited_at": "2026-04-14T12:00:00+00:00"
+      }
+    ],
+    "page": 1,
+    "per_page": 20,
+    "total": 1
+  }
+}
+```
+
+#### 2.7 后台批量禁用
+
+- **POST** `/api/v1/admin/short-urls/bulk-disable`
+- Request JSON：
+
+```json
+{
+  "codes": ["learn01", "promo99"]
+}
+```
+
+响应（200）：
+
+```json
+{
+  "data": {
+    "requested": 2,
+    "disabled": 1,
+    "missing": ["promo99"]
+  }
+}
+```
 
 ---
 
@@ -161,6 +222,32 @@ SQL 文件：`database/mysql/short_url_schema.sql`
 作用：
 - 防止恶意刷创建接口
 
+#### 4.5 幂等键
+
+- Key：`shorturl:idem:create:{idempotency_key}`
+- Value：短码 `code`
+- TTL：默认 24h
+
+作用：
+- 防止客户端重试导致重复创建
+- 配合 Header `Idempotency-Key` 使用
+
+#### 4.6 异步访问日志队列
+
+- Stream：`shorturl:visit:stream`
+- Group：`visit-log-workers`
+- Consumer：`worker-<name>`
+
+消息字段：
+- `short_url_code`
+- `visited_at`
+- `client_ip`
+- `user_agent`
+
+说明：
+- API 请求只入队，不同步写 `short_url_visits`
+- Worker 异步消费并入库
+
 ---
 
 ### 5. Swoole 架构说明
@@ -171,7 +258,8 @@ SQL 文件：`database/mysql/short_url_schema.sql`
 1. 创建 PDO（MySQL）
 2. 创建 Redis 客户端（Predis）
 3. 组装仓储/缓存/统计/限流组件
-4. 组装 `ShortUrlService`
+4. 组装幂等存储与访问日志队列组件
+5. 组装 `ShortUrlService`
 5. 组装 `ShortUrlApiController`
 6. 使用 `SwooleShortUrlServer` 注册 HTTP request 回调并启动
 
@@ -205,12 +293,18 @@ export REDIS_DATABASE=0
 php examples/short_url_api_server.php
 ```
 
+访问日志 worker：
+
+```bash
+php examples/short_url_visit_log_worker.php
+```
+
 ---
 
 ### 7. 生产优化建议（进阶）
 
 1. **访问日志异步化**
-   - 通过 Redis Stream / Kafka 先入队，Worker 异步批量写 MySQL。
+   - 已实现 Redis Stream 入队 + Worker 消费模式，可按实例横向扩展 Worker。
 2. **写扩散优化**
    - `total_visits` 采用“Redis 计数 + 定时回刷 MySQL”模式，减少行锁竞争。
 3. **唯一短码生成**
@@ -230,5 +324,8 @@ php examples/short_url_api_server.php
 
 - 创建逻辑（URL 校验、短码冲突、限流）
 - 跳转逻辑（访问计数、最近访问记录）
+- 幂等创建（重复请求返回同一短码）
+- 后台管理接口（分页筛选、批量禁用）
+- 访问日志 Worker（消费、ack、异常容错）
 - API 控制器（状态码、JSON、路由分发）
 

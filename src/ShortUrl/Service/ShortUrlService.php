@@ -9,8 +9,11 @@ use DateTimeImmutable;
 use SwooleLearn\ShortUrl\Contracts\RateLimiterInterface;
 use SwooleLearn\ShortUrl\Contracts\ShortCodeGeneratorInterface;
 use SwooleLearn\ShortUrl\Contracts\ShortUrlCacheInterface;
+use SwooleLearn\ShortUrl\Contracts\IdempotencyStoreInterface;
 use SwooleLearn\ShortUrl\Contracts\ShortUrlRepositoryInterface;
 use SwooleLearn\ShortUrl\Contracts\StatsStoreInterface;
+use SwooleLearn\ShortUrl\Contracts\VisitEventQueueInterface;
+use SwooleLearn\ShortUrl\Entity\ShortUrlListItem;
 use SwooleLearn\ShortUrl\Entity\ShortUrlRecord;
 use SwooleLearn\ShortUrl\Exception\ConflictException;
 use SwooleLearn\ShortUrl\Exception\InactiveShortUrlException;
@@ -32,6 +35,8 @@ final class ShortUrlService
         private readonly StatsStoreInterface $statsStore,
         private readonly RateLimiterInterface $rateLimiter,
         private readonly ShortCodeGeneratorInterface $codeGenerator,
+        private readonly IdempotencyStoreInterface $idempotencyStore,
+        private readonly VisitEventQueueInterface $visitEventQueue,
         private readonly string $publicBaseUrl,
         ?callable $clock = null,
         private readonly int $createLimit = 30,
@@ -78,6 +83,42 @@ final class ShortUrlService
         return $saved;
     }
 
+    public function createIdempotent(
+        string $idempotencyKey,
+        string $originalUrl,
+        ?string $customCode = null,
+        ?DateTimeImmutable $expiresAt = null,
+        string $clientIp = '0.0.0.0'
+    ): ShortUrlRecord {
+        $normalizedKey = trim($idempotencyKey);
+        if ($normalizedKey === '') {
+            throw new ValidationException('Idempotency-Key header is required.');
+        }
+
+        $fullKey = 'create:' . $normalizedKey;
+        $existingCode = $this->idempotencyStore->get($fullKey);
+        if ($existingCode !== null && $existingCode !== '') {
+            return $this->loadRecord($this->normalizeCode($existingCode));
+        }
+
+        $created = $this->create(
+            originalUrl: $originalUrl,
+            customCode: $customCode,
+            expiresAt: $expiresAt,
+            clientIp: $clientIp
+        );
+
+        $claimed = $this->idempotencyStore->claim($fullKey, $created->code, 86400);
+        if (!$claimed) {
+            $existingCode = $this->idempotencyStore->get($fullKey);
+            if ($existingCode !== null && $existingCode !== '') {
+                return $this->loadRecord($this->normalizeCode($existingCode));
+            }
+        }
+
+        return $created;
+    }
+
     public function resolve(string $code, string $clientIp, string $userAgent = ''): ShortUrlRecord
     {
         $record = $this->loadRecord($this->normalizeCode($code));
@@ -92,7 +133,13 @@ final class ShortUrlService
         }
 
         $this->repository->incrementVisits($record->code, $now);
-        $this->repository->appendVisitLog($record->code, $now, $clientIp, $userAgent);
+        $visitPayload = [
+            'short_url_code' => $record->code,
+            'visited_at' => $now->format(DATE_ATOM),
+            'client_ip' => $clientIp,
+            'user_agent' => $userAgent,
+        ];
+        $this->visitEventQueue->push($visitPayload);
         $this->statsStore->increment($record->code);
         $this->statsStore->addRecentVisit($record->code, [
             'visited_at' => $now->format(DATE_ATOM),
@@ -147,6 +194,75 @@ final class ShortUrlService
         }
 
         $this->cache->forget($normalizedCode);
+    }
+
+    /**
+     * @return array{items: list<array{
+     *   code: string,
+     *   short_url: string,
+     *   original_url: string,
+     *   is_active: bool,
+     *   total_visits: int,
+     *   created_at: string,
+     *   expires_at: string|null,
+     *   last_visited_at: string|null
+     * }>, page: int, per_page: int, total: int}
+     */
+    public function listShortUrls(int $page = 1, int $perPage = 20, ?bool $isActive = null, ?string $keyword = null): array
+    {
+        $safePage = max(1, $page);
+        $safePerPage = max(1, min(100, $perPage));
+        $safeKeyword = $keyword === null ? null : trim($keyword);
+
+        $result = $this->repository->paginate($safePage, $safePerPage, $isActive, $safeKeyword);
+
+        return [
+            'items' => array_map(
+                fn (ShortUrlListItem $item): array => [
+                    'code' => $item->code,
+                    'short_url' => $this->buildShortUrl($item->code),
+                    'original_url' => $item->originalUrl,
+                    'is_active' => $item->isActive,
+                    'total_visits' => $item->totalVisits,
+                    'created_at' => $item->createdAt->format(DATE_ATOM),
+                    'expires_at' => $item->expiresAt?->format(DATE_ATOM),
+                    'last_visited_at' => $item->lastVisitedAt?->format(DATE_ATOM),
+                ],
+                $result->items
+            ),
+            'page' => $result->page,
+            'per_page' => $result->perPage,
+            'total' => $result->total,
+        ];
+    }
+
+    /**
+     * @param list<string> $codes
+     *
+     * @return array{requested: int, disabled: int, missing: list<string>}
+     */
+    public function bulkDisable(array $codes): array
+    {
+        $normalized = [];
+        foreach ($codes as $code) {
+            $normalized[] = $this->normalizeCode((string) $code);
+        }
+        $normalized = array_values(array_unique($normalized));
+
+        if ($normalized === []) {
+            throw new ValidationException('codes must contain at least one short code.');
+        }
+
+        $bulkResult = $this->repository->bulkDisable($normalized);
+        foreach ($normalized as $code) {
+            $this->cache->forget($code);
+        }
+
+        return [
+            'requested' => count($normalized),
+            'disabled' => $bulkResult['disabled'],
+            'missing' => $bulkResult['missing'],
+        ];
     }
 
     public function buildShortUrl(string $code): string

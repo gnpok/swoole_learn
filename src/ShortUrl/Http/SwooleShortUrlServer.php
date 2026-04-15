@@ -32,12 +32,23 @@ final class SwooleShortUrlServer
             $path = (string) ($request->server['request_uri'] ?? '/');
             $query = property_exists($request, 'get') && is_array($request->get) ? $request->get : [];
             $clientIp = (string) ($request->server['remote_addr'] ?? '0.0.0.0');
-            $userAgent = property_exists($request, 'header') && is_array($request->header)
-                ? (string) ($request->header['user-agent'] ?? '')
-                : '';
+            $headers = property_exists($request, 'header') && is_array($request->header)
+                ? $request->header
+                : [];
+            $userAgent = (string) ($headers['user-agent'] ?? '');
             $body = $this->extractJsonBody($request, $method);
 
-            $apiResponse = $this->controller->handle($method, $path, $query, $body, $clientIp, $userAgent);
+            $apiResponse = $this->controller->handle(
+                new RequestContext(
+                    method: $method,
+                    path: $path,
+                    query: $query,
+                    body: $body,
+                    headers: $this->normalizeHeaders($headers),
+                    clientIp: $clientIp,
+                    userAgent: $userAgent
+                )
+            );
 
             $response->status($apiResponse->statusCode);
             foreach ($apiResponse->headers as $key => $value) {
@@ -77,5 +88,22 @@ final class SwooleShortUrlServer
         }
 
         return $decoded;
+    }
+
+    /**
+     * @param array<string, mixed> $headers
+     *
+     * @return array<string, string>
+     */
+    private function normalizeHeaders(array $headers): array
+    {
+        $normalized = [];
+        foreach ($headers as $key => $value) {
+            $rawKey = strtolower((string) $key);
+            $headerName = str_replace(' ', '-', ucwords(str_replace('-', ' ', $rawKey)));
+            $normalized[$headerName] = (string) $value;
+        }
+
+        return $normalized;
     }
 }

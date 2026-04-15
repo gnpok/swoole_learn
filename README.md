@@ -41,6 +41,7 @@ php examples/http_server.php
 php examples/coroutine_batch.php
 php examples/timer_tick.php
 php examples/short_url_api_server.php
+php examples/short_url_visit_log_worker.php
 ```
 
 ## 5. 短地址服务学习模块
@@ -60,6 +61,12 @@ php examples/short_url_api_server.php
 
 - `docs/short-url-service.md`
 - `database/mysql/short_url_schema.sql`
+
+新增进阶能力：
+
+- 幂等创建（`Idempotency-Key` 请求头）
+- Redis Stream 异步访问日志（HTTP 入队 + Worker 消费写 MySQL）
+- 后台管理 API（分页筛选、批量禁用）
 
 ## 6. 项目结构
 

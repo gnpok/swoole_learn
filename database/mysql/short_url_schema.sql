@@ -43,6 +43,17 @@ CREATE TABLE IF NOT EXISTS short_url_daily_stats (
     KEY idx_short_url_daily_stats_stat_date (stat_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='按天统计表（可由异步任务聚合）';
 
+CREATE TABLE IF NOT EXISTS short_url_idempotency (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+    idem_key VARCHAR(96) NOT NULL COMMENT '幂等键，建议带业务前缀',
+    short_code VARCHAR(16) NOT NULL COMMENT '对应短码',
+    created_at DATETIME NOT NULL COMMENT '创建时间',
+    expires_at DATETIME NOT NULL COMMENT '过期时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_short_url_idempotency_key (idem_key),
+    KEY idx_short_url_idempotency_expires_at (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='幂等键持久化（可选，主流程用 Redis）';
+
 -- 可选：历史日志归档策略
 -- 1) 定时任务将 short_url_visits 中 N 天前数据归档到历史库
 -- 2) 仅保留最近 30/90 天明细日志，主统计留在 short_urls + short_url_daily_stats
