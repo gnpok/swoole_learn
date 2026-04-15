@@ -15,6 +15,9 @@ use SwooleLearn\ShortUrl\Infrastructure\RedisRateLimiter;
 use SwooleLearn\ShortUrl\Infrastructure\RedisShortUrlCache;
 use SwooleLearn\ShortUrl\Infrastructure\RedisStatsStore;
 use SwooleLearn\ShortUrl\Infrastructure\RedisVisitEventQueue;
+use SwooleLearn\ShortUrl\Observability\CallableHealthReporter;
+use SwooleLearn\ShortUrl\Observability\InMemoryPrometheusCollector;
+use SwooleLearn\ShortUrl\Observability\JsonStructuredLogger;
 use SwooleLearn\ShortUrl\Service\ShortUrlService;
 use SwooleLearn\ShortUrl\Support\Base62CodeGenerator;
 
@@ -25,6 +28,9 @@ $redis = new Client([
     'password' => getenv('REDIS_PASSWORD') ?: null,
     'database' => (int) (getenv('REDIS_DATABASE') ?: 0),
 ]);
+
+$logger = new JsonStructuredLogger();
+$metrics = new InMemoryPrometheusCollector();
 
 $service = new ShortUrlService(
     repository: new PdoShortUrlRepository(PdoFactory::fromEnv()),
@@ -40,7 +46,9 @@ $service = new ShortUrlService(
         consumerGroup: getenv('REDIS_VISIT_CONSUMER_GROUP') ?: 'visit-log-workers',
         consumerName: getenv('REDIS_VISIT_CONSUMER_NAME') ?: 'worker-api'
     ),
-    publicBaseUrl: getenv('PUBLIC_BASE_URL') ?: 'http://127.0.0.1:9501'
+    publicBaseUrl: getenv('PUBLIC_BASE_URL') ?: 'http://127.0.0.1:9501',
+    metrics: $metrics,
+    logger: $logger
 );
 
 $adminApiKeys = getenv('ADMIN_API_KEYS') ?: '';
@@ -48,7 +56,23 @@ $controller = new ShortUrlApiController(
     $service,
     $adminApiKeys !== ''
         ? $adminApiKeys
-        : (getenv('ADMIN_API_KEY') ?: null)
+        : (getenv('ADMIN_API_KEY') ?: null),
+    $metrics,
+    $logger,
+    new CallableHealthReporter([
+        'mysql' => static function (): array {
+            $pdo = PdoFactory::fromEnv();
+            $pdo->query('SELECT 1');
+
+            return ['status' => 'up'];
+        },
+        'redis' => static function () use ($redis): array {
+            $pong = $redis->ping();
+            $isUp = is_string($pong) && stripos($pong, 'pong') !== false;
+
+            return ['status' => $isUp ? 'up' : 'down', 'details' => ['ping' => (string) $pong]];
+        },
+    ])
 );
 $server = new SwooleShortUrlServer(
     new SwooleHttpServerRuntime(

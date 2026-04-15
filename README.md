@@ -71,6 +71,50 @@ php examples/short_url_visit_log_worker.php
 - 访问日志批量落库 + 失败重试 + 死信队列（DLQ）
 - 后台管理 API（分页筛选、批量禁用）
 - 管理端 API Key 鉴权（`X-Admin-Api-Key`）
+- 可观测性基线（结构化日志 + Prometheus 指标 + 健康检查 + Trace ID）
+
+## 6. 可观测性（Observability）快速体验
+
+API 启动后新增观测端点：
+
+- `GET /health`：存活探针（Liveness）
+- `GET /readyz`：就绪探针（Readiness，包含 MySQL/Redis 子检查）
+- `GET /metrics`：Prometheus 文本格式指标
+
+所有 API 响应都会返回：
+
+- `X-Trace-Id`：请求链路追踪 ID（可由客户端透传 `X-Trace-Id`）
+
+结构化日志（JSON）字段示例：
+
+```json
+{
+  "timestamp": "2026-04-14T12:34:56+00:00",
+  "level": "INFO",
+  "message": "HTTP request handled",
+  "context": {
+    "trace_id": "7e3a0dd7d5d8a8ef",
+    "method": "POST",
+    "path": "/api/v1/short-urls",
+    "route": "create_short_url",
+    "status_code": 201,
+    "duration_ms": 3.214,
+    "client_ip": "127.0.0.1"
+  }
+}
+```
+
+常用指标示例：
+
+- `shorturl_http_requests_total{method,route,status_code}`
+- `shorturl_http_request_duration_seconds_bucket{method,route,le}`
+- `shorturl_http_in_flight_requests`
+- `shorturl_service_create_total{result,error_type?}`
+- `shorturl_service_resolve_total{result,error_type?}`
+- `shorturl_cache_lookup_total{result=hit|miss}`
+- `shorturl_worker_events_processed_total{mode,result}`
+- `shorturl_worker_retry_total`
+- `shorturl_worker_dead_letter_total`
 
 ## 7. 生产化运行建议（最小版）
 
@@ -80,6 +124,7 @@ php examples/short_url_visit_log_worker.php
 export ADMIN_API_KEY=replace-with-strong-key
 export REDIS_VISIT_STREAM=shorturl:visit:stream
 export REDIS_VISIT_DLQ_STREAM=shorturl:visit:stream:dlq
+export WORKER_METRICS_SNAPSHOT_EVERY=100
 ```
 
 启动 API 服务：

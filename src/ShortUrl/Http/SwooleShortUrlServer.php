@@ -32,11 +32,13 @@ final class SwooleShortUrlServer
             $path = (string) ($request->server['request_uri'] ?? '/');
             $query = property_exists($request, 'get') && is_array($request->get) ? $request->get : [];
             $clientIp = (string) ($request->server['remote_addr'] ?? '0.0.0.0');
-            $headers = property_exists($request, 'header') && is_array($request->header)
+            $rawHeaders = property_exists($request, 'header') && is_array($request->header)
                 ? $request->header
                 : [];
+            $headers = $this->normalizeHeaders($rawHeaders);
             $userAgent = (string) ($headers['user-agent'] ?? '');
             $body = $this->extractJsonBody($request, $method);
+            $traceId = $headers['x-trace-id'] ?? $this->newTraceId();
 
             $apiResponse = $this->controller->handle(
                 new RequestContext(
@@ -44,14 +46,19 @@ final class SwooleShortUrlServer
                     path: $path,
                     query: $query,
                     body: $body,
-                    headers: $this->normalizeHeaders($headers),
+                    headers: $headers,
                     clientIp: $clientIp,
-                    userAgent: $userAgent
+                    userAgent: $userAgent,
+                    traceId: $traceId
                 )
             );
 
             $response->status($apiResponse->statusCode);
-            foreach ($apiResponse->headers as $key => $value) {
+            $headersToSend = $apiResponse->headers;
+            if (!isset($headersToSend['X-Trace-Id']) && !isset($headersToSend['x-trace-id'])) {
+                $headersToSend['X-Trace-Id'] = $traceId;
+            }
+            foreach ($headersToSend as $key => $value) {
                 $response->header($key, $value);
             }
 
@@ -99,11 +106,18 @@ final class SwooleShortUrlServer
     {
         $normalized = [];
         foreach ($headers as $key => $value) {
-            $rawKey = strtolower((string) $key);
-            $headerName = str_replace(' ', '-', ucwords(str_replace('-', ' ', $rawKey)));
-            $normalized[$headerName] = (string) $value;
+            $normalized[strtolower((string) $key)] = (string) $value;
         }
 
         return $normalized;
+    }
+
+    private function newTraceId(): string
+    {
+        try {
+            return bin2hex(random_bytes(8));
+        } catch (\Throwable) {
+            return str_replace('.', '', uniqid('trace', true));
+        }
     }
 }

@@ -20,6 +20,8 @@ use SwooleLearn\ShortUrl\Exception\ConflictException;
 use SwooleLearn\ShortUrl\Exception\InactiveShortUrlException;
 use SwooleLearn\ShortUrl\Exception\RateLimitException;
 use SwooleLearn\ShortUrl\Exception\ValidationException;
+use SwooleLearn\ShortUrl\Observability\InMemoryPrometheusCollector;
+use SwooleLearn\ShortUrl\Observability\LoggerInterface;
 use SwooleLearn\ShortUrl\Service\ShortUrlService;
 
 final class ShortUrlServiceTest extends TestCase
@@ -296,6 +298,36 @@ final class ShortUrlServiceTest extends TestCase
         $service->bulkDisable([]);
     }
 
+    public function test_observability_metrics_include_create_resolve_and_cache_events(): void
+    {
+        $repository = new FakeShortUrlRepository();
+        $cache = new FakeShortUrlCache();
+        $stats = new FakeStatsStore();
+        $limiter = new FakeRateLimiter();
+        $generator = new FakeCodeGenerator(['obs1001']);
+        $metrics = new InMemoryPrometheusCollector();
+
+        $service = $this->newService(
+            $repository,
+            $cache,
+            $stats,
+            $limiter,
+            $generator,
+            metrics: $metrics
+        );
+
+        $record = $service->create('https://example.com/metrics');
+        $service->resolve($record->code, '127.0.0.1', 'phpunit');
+        $service->getDetail($record->code);
+        $service->getDetail($record->code);
+
+        $dump = $metrics->renderPrometheus();
+        self::assertStringContainsString('shorturl_service_create_total{result="success"} 1', $dump);
+        self::assertStringContainsString('shorturl_service_resolve_total{result="success"} 1', $dump);
+        self::assertStringContainsString('shorturl_cache_lookup_total{result="miss"} 1', $dump);
+        self::assertStringContainsString('shorturl_cache_lookup_total{result="hit"}', $dump);
+    }
+
     private function newService(
         ShortUrlRepositoryInterface $repository,
         ShortUrlCacheInterface $cache,
@@ -304,7 +336,9 @@ final class ShortUrlServiceTest extends TestCase
         ShortCodeGeneratorInterface $codeGenerator,
         ?callable $clock = null,
         ?IdempotencyStoreInterface $idempotencyStore = null,
-        ?VisitEventQueueInterface $visitEventQueue = null
+        ?VisitEventQueueInterface $visitEventQueue = null,
+        ?InMemoryPrometheusCollector $metrics = null,
+        ?LoggerInterface $logger = null
     ): ShortUrlService {
         return new ShortUrlService(
             repository: $repository,
@@ -317,7 +351,9 @@ final class ShortUrlServiceTest extends TestCase
             publicBaseUrl: 'http://127.0.0.1:9501',
             clock: $clock,
             createLimit: 30,
-            createWindowSeconds: 60
+            createWindowSeconds: 60,
+            metrics: $metrics,
+            logger: $logger
         );
     }
 }

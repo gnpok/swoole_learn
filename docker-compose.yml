@@ -62,6 +62,7 @@ services:
       REDIS_VISIT_STREAM: shorturl:visit:stream
       REDIS_VISIT_DLQ_STREAM: shorturl:visit:stream:dlq
       ADMIN_API_KEYS: default:replace-with-strong-key
+      WORKER_METRICS_SNAPSHOT_EVERY: 0
     volumes:
       - ./:/app
     command: >
@@ -100,6 +101,7 @@ services:
       VISIT_LOG_RECLAIM_IDLE_MS: 60000
       VISIT_LOG_RECLAIM_COUNT: 50
       VISIT_LOG_MAX_ATTEMPTS: 5
+      WORKER_METRICS_SNAPSHOT_EVERY: 100
     volumes:
       - ./:/app
     command: >

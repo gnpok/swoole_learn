@@ -10,6 +10,7 @@ use SwooleLearn\ShortUrl\Contracts\ShortUrlRepositoryInterface;
 use SwooleLearn\ShortUrl\Contracts\VisitEventQueueInterface;
 use SwooleLearn\ShortUrl\Entity\ShortUrlPage;
 use SwooleLearn\ShortUrl\Entity\ShortUrlRecord;
+use SwooleLearn\ShortUrl\Observability\InMemoryPrometheusCollector;
 use SwooleLearn\ShortUrl\Service\ShortUrlVisitLogWorker;
 
 final class ShortUrlVisitLogWorkerTest extends TestCase
@@ -123,6 +124,32 @@ final class ShortUrlVisitLogWorkerTest extends TestCase
         self::assertTrue($queue->autoClaimCalled);
         self::assertCount(1, $repository->visitLogs);
         self::assertSame(['p-1-0'], $queue->acked);
+    }
+
+    public function test_worker_metrics_are_recorded_for_processing_and_retry(): void
+    {
+        $queue = new WorkerQueueDouble();
+        $repository = new WorkerRepositoryDouble(throwOnBatch: true, throwOnSingle: true);
+        $metrics = new InMemoryPrometheusCollector();
+
+        $queue->push([
+            'short_url_code' => 'code-obsv',
+            'visited_at' => '2026-04-14T10:10:10+00:00',
+            'client_ip' => '127.0.0.1',
+            'user_agent' => 'phpunit',
+            'event_key' => 'event-key-obsv',
+            'attempt' => 1,
+        ]);
+
+        $worker = new ShortUrlVisitLogWorker($queue, $repository, maxAttempts: 5, metrics: $metrics);
+        $processed = $worker->processOnce();
+
+        self::assertSame(0, $processed);
+        $dump = $metrics->renderPrometheus();
+        self::assertStringContainsString('shorturl_worker_poll_total{result="non_empty"} 1', $dump);
+        self::assertStringContainsString('shorturl_worker_retry_total{result="queued"} 1', $dump);
+        self::assertStringContainsString('shorturl_worker_acks_total 1', $dump);
+        self::assertStringContainsString('shorturl_worker_process_duration_seconds_bucket', $dump);
     }
 }
 
