@@ -18,6 +18,9 @@ use SwooleLearn\ShortUrl\Entity\ShortUrlPage;
 use SwooleLearn\ShortUrl\Entity\ShortUrlRecord;
 use SwooleLearn\ShortUrl\Http\RequestContext;
 use SwooleLearn\ShortUrl\Http\ShortUrlApiController;
+use SwooleLearn\ShortUrl\Observability\CallableHealthReporter;
+use SwooleLearn\ShortUrl\Observability\InMemoryPrometheusCollector;
+use SwooleLearn\ShortUrl\Observability\LoggerInterface;
 use SwooleLearn\ShortUrl\Service\ShortUrlService;
 
 final class ShortUrlApiControllerTest extends TestCase
@@ -102,8 +105,11 @@ final class ShortUrlApiControllerTest extends TestCase
     {
         $controller = $this->newController();
         $response = $controller->handle(new RequestContext('GET', '/api/v1/unknown'));
+        $payload = json_decode($response->body, true);
 
         self::assertSame(404, $response->statusCode);
+        self::assertSame('ROUTE_NOT_FOUND', $payload['error']['code'] ?? null);
+        self::assertArrayHasKey('trace_id', $payload['error'] ?? []);
     }
 
     public function test_create_with_idempotency_key_returns_same_short_code(): void
@@ -181,12 +187,113 @@ final class ShortUrlApiControllerTest extends TestCase
             method: 'GET',
             path: '/api/v1/admin/short-urls'
         ));
+        $payload = json_decode($response->body, true);
 
         self::assertSame(401, $response->statusCode);
+        self::assertSame('UNAUTHORIZED', $payload['error']['code'] ?? null);
     }
 
-    private function newController(): ShortUrlApiController
+    public function test_admin_endpoint_accepts_rotated_api_key_from_env_list(): void
     {
+        putenv('ADMIN_API_KEYS=old-key,new-key');
+        try {
+            $controller = $this->newController(null);
+            $response = $controller->handle(new RequestContext(
+                method: 'GET',
+                path: '/api/v1/admin/short-urls',
+                headers: ['x-admin-api-key' => 'new-key']
+            ));
+
+            self::assertSame(200, $response->statusCode);
+        } finally {
+            putenv('ADMIN_API_KEYS');
+        }
+    }
+
+    public function test_metrics_endpoint_exposes_prometheus_payload(): void
+    {
+        $metrics = new InMemoryPrometheusCollector();
+        $controller = $this->newController('test-admin-key', $metrics);
+        $controller->handle(new RequestContext(
+            method: 'GET',
+            path: '/api/v1/unknown',
+            traceId: 'trace-metrics'
+        ));
+
+        $response = $controller->handle(new RequestContext(
+            method: 'GET',
+            path: '/metrics',
+            traceId: 'trace-metrics'
+        ));
+
+        self::assertSame(200, $response->statusCode);
+        self::assertStringContainsString('shorturl_http_requests_total', $response->body);
+        self::assertStringContainsString('error_class="4xx"', $response->body);
+        self::assertSame('text/plain; version=0.0.4; charset=utf-8', $response->headers['Content-Type'] ?? null);
+        self::assertSame('trace-metrics', $response->headers['X-Trace-Id'] ?? null);
+    }
+
+    public function test_readyz_returns_503_when_health_reporter_down(): void
+    {
+        $controller = $this->newController(
+            'test-admin-key',
+            null,
+            new CallableHealthReporter([
+                'mysql' => static fn (): array => ['status' => 'down', 'details' => ['reason' => 'connection refused']],
+            ])
+        );
+        $response = $controller->handle(new RequestContext(
+            method: 'GET',
+            path: '/readyz',
+            traceId: 'trace-readyz'
+        ));
+        $payload = json_decode($response->body, true);
+
+        self::assertSame(503, $response->statusCode);
+        self::assertSame('down', $payload['status'] ?? null);
+        self::assertSame('trace-readyz', $response->headers['X-Trace-Id'] ?? null);
+    }
+
+    public function test_request_logs_emitted_with_trace_id(): void
+    {
+        $logger = new CollectingLogger();
+        $controller = $this->newController('test-admin-key', null, null, $logger);
+        $controller->handle(new RequestContext(
+            method: 'GET',
+            path: '/api/v1/unknown',
+            traceId: 'trace-log'
+        ));
+
+        self::assertNotEmpty($logger->records);
+        self::assertSame('trace-log', $logger->records[0]['context']['trace_id'] ?? null);
+        self::assertSame('GET', $logger->records[0]['context']['method'] ?? null);
+    }
+
+    public function test_traceparent_is_used_for_trace_id_when_x_trace_id_missing(): void
+    {
+        $controller = $this->newController();
+        $traceparent = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01';
+
+        $response = $controller->handle(new RequestContext(
+            method: 'GET',
+            path: '/api/v1/unknown',
+            headers: ['traceparent' => $traceparent]
+        ));
+        $payload = json_decode($response->body, true);
+
+        self::assertSame(404, $response->statusCode);
+        self::assertSame('4bf92f3577b34da6a3ce929d0e0e4736', $response->headers['X-Trace-Id'] ?? null);
+        self::assertSame('4bf92f3577b34da6a3ce929d0e0e4736', $payload['error']['trace_id'] ?? null);
+    }
+
+    private function newController(
+        ?string $adminApiKey = 'test-admin-key',
+        ?InMemoryPrometheusCollector $metrics = null,
+        ?CallableHealthReporter $healthReporter = null,
+        ?LoggerInterface $logger = null
+    ): ShortUrlApiController
+    {
+        $metrics ??= new InMemoryPrometheusCollector();
         $service = new ShortUrlService(
             repository: new ControllerFakeRepository(),
             cache: new ControllerFakeCache(),
@@ -195,10 +302,33 @@ final class ShortUrlApiControllerTest extends TestCase
             codeGenerator: new ControllerFakeCodeGenerator(['qwerty1', 'qwerty2', 'qwerty3']),
             idempotencyStore: new ControllerFakeIdempotencyStore(),
             visitEventQueue: new ControllerFakeVisitEventQueue(),
-            publicBaseUrl: 'http://127.0.0.1:9501'
+            publicBaseUrl: 'http://127.0.0.1:9501',
+            metrics: $metrics,
+            logger: $logger
         );
 
-        return new ShortUrlApiController($service, 'test-admin-key');
+        return new ShortUrlApiController($service, $adminApiKey, $metrics, $logger, $healthReporter);
+    }
+}
+
+final class CollectingLogger implements LoggerInterface
+{
+    /** @var list<array{level: string, message: string, context: array<string, mixed>}> */
+    public array $records = [];
+
+    public function info(string $message, array $context = []): void
+    {
+        $this->records[] = ['level' => 'info', 'message' => $message, 'context' => $context];
+    }
+
+    public function warning(string $message, array $context = []): void
+    {
+        $this->records[] = ['level' => 'warning', 'message' => $message, 'context' => $context];
+    }
+
+    public function error(string $message, array $context = []): void
+    {
+        $this->records[] = ['level' => 'error', 'message' => $message, 'context' => $context];
     }
 }
 
@@ -458,6 +588,11 @@ final class ControllerFakeVisitEventQueue implements VisitEventQueueInterface
     }
 
     public function consume(int $count = 100, int $blockMs = 1000): array
+    {
+        return [];
+    }
+
+    public function reclaim(int $minIdleMs = 60000, int $count = 100): array
     {
         return [];
     }

@@ -11,16 +11,28 @@ use SwooleLearn\ShortUrl\Exception\NotFoundException;
 use SwooleLearn\ShortUrl\Exception\RateLimitException;
 use SwooleLearn\ShortUrl\Exception\UnauthorizedException;
 use SwooleLearn\ShortUrl\Exception\ValidationException;
+use SwooleLearn\ShortUrl\Observability\HealthReporterInterface;
+use SwooleLearn\ShortUrl\Observability\LoggerInterface;
+use SwooleLearn\ShortUrl\Observability\MetricsCollectorInterface;
+use SwooleLearn\ShortUrl\Observability\NullLogger;
+use SwooleLearn\ShortUrl\Observability\NullMetricsCollector;
 use SwooleLearn\ShortUrl\Service\ShortUrlService;
 use Throwable;
 
 final class ShortUrlApiController
 {
+    private int $inFlightRequests = 0;
+    private ErrorResponseFactory $errorFactory;
+
     public function __construct(
         private readonly ShortUrlService $service,
-        private readonly ?string $adminApiKey = null
+        private readonly ?string $adminApiKey = null,
+        private readonly ?MetricsCollectorInterface $metrics = null,
+        private readonly ?LoggerInterface $logger = null,
+        private readonly ?HealthReporterInterface $healthReporter = null
     )
     {
+        $this->errorFactory = new ErrorResponseFactory();
     }
 
     /**
@@ -31,64 +43,171 @@ final class ShortUrlApiController
     {
         $query = $context->query ?? [];
         $body = $context->body;
+        $traceId = $context->traceId !== '' ? $context->traceId : TraceContext::newTraceId();
+        $route = 'unknown';
+        $method = strtoupper($context->method);
+        $response = null;
+        $startedAtNs = hrtime(true);
+        $metrics = $this->metrics ?? new NullMetricsCollector();
+        $logger = $this->logger ?? new NullLogger();
+
+        $this->inFlightRequests++;
+        $metrics->setGauge(
+            name: 'shorturl_http_in_flight_requests',
+            value: (float) $this->inFlightRequests,
+            help: 'Number of currently processing HTTP requests.'
+        );
+
+        $traceSource = 'generated';
+        if (($context->headers['traceparent'] ?? null) !== null) {
+            $parsedTraceId = TraceContext::extractTraceIdFromTraceparent((string) $context->headers['traceparent']);
+            if ($parsedTraceId !== null) {
+                $traceId = $parsedTraceId;
+                $traceSource = 'traceparent';
+            }
+        } elseif (($context->headers['x-trace-id'] ?? null) !== null || ($context->headers['X-Trace-Id'] ?? null) !== null) {
+            $traceSource = 'x-trace-id';
+        }
+        $metrics->incrementCounter(
+            name: 'shorturl_trace_context_total',
+            labels: ['source' => $traceSource],
+            help: 'Trace context source used for request correlation.'
+        );
 
         try {
             if ($context->path === '/health') {
-                return ApiResponse::json(200, ['status' => 'ok']);
-            }
-
-            if ($context->method === 'POST' && $context->path === '/api/v1/short-urls') {
-                return $this->createShortUrl($body, $context);
-            }
-
-            if ($context->method === 'GET' && preg_match('#^/r/([A-Za-z0-9_-]{4,16})$#', $context->path, $matches) === 1) {
+                $route = 'health';
+                $response = ApiResponse::json(200, [
+                    'status' => 'ok',
+                    'service' => 'short-url-api',
+                    'timestamp' => (new DateTimeImmutable())->format(DATE_ATOM),
+                ]);
+            } elseif ($context->method === 'GET' && $context->path === '/readyz') {
+                $route = 'readyz';
+                $report = $this->healthReporter?->report() ?? [
+                    'status' => 'up',
+                    'timestamp' => (new DateTimeImmutable())->format(DATE_ATOM),
+                    'checks' => [],
+                ];
+                $statusCode = ($report['status'] ?? 'down') === 'down' ? 503 : 200;
+                $metrics->setGauge(
+                    name: 'shorturl_readiness_status',
+                    value: $statusCode === 200 ? 1.0 : 0.0,
+                    labels: ['status' => (string) ($report['status'] ?? 'down')],
+                    help: 'Readiness probe status where 1=ready and 0=not-ready.'
+                );
+                $response = ApiResponse::json($statusCode, $report);
+            } elseif ($context->method === 'GET' && $context->path === '/metrics') {
+                $route = 'metrics';
+                $response = ApiResponse::text(
+                    200,
+                    $metrics->renderPrometheus(),
+                    ['Content-Type' => 'text/plain; version=0.0.4; charset=utf-8']
+                );
+            } elseif ($context->method === 'POST' && $context->path === '/api/v1/short-urls') {
+                $route = 'create_short_url';
+                $response = $this->createShortUrl($body, $context);
+            } elseif ($context->method === 'GET' && preg_match('#^/r/([A-Za-z0-9_-]{4,16})$#', $context->path, $matches) === 1) {
+                $route = 'redirect_short_url';
                 $record = $this->service->resolve($matches[1], $context->clientIp, $context->userAgent);
-
-                return ApiResponse::redirect($record->originalUrl);
-            }
-
-            if ($context->method === 'GET' && preg_match('#^/api/v1/short-urls/([A-Za-z0-9_-]{4,16})$#', $context->path, $matches) === 1) {
+                $response = ApiResponse::redirect($record->originalUrl);
+            } elseif ($context->method === 'GET' && preg_match('#^/api/v1/short-urls/([A-Za-z0-9_-]{4,16})$#', $context->path, $matches) === 1) {
+                $route = 'detail_short_url';
                 $detail = $this->service->getDetail($matches[1]);
-
-                return ApiResponse::json(200, ['data' => $detail]);
-            }
-
-            if ($context->method === 'GET' && preg_match('#^/api/v1/short-urls/([A-Za-z0-9_-]{4,16})/stats$#', $context->path, $matches) === 1) {
+                $response = ApiResponse::json(200, ['data' => $detail]);
+            } elseif ($context->method === 'GET' && preg_match('#^/api/v1/short-urls/([A-Za-z0-9_-]{4,16})/stats$#', $context->path, $matches) === 1) {
+                $route = 'stats_short_url';
                 $detail = $this->service->getDetail($matches[1]);
-
-                return ApiResponse::json(200, ['data' => $detail]);
-            }
-
-            if ($context->method === 'DELETE' && preg_match('#^/api/v1/short-urls/([A-Za-z0-9_-]{4,16})$#', $context->path, $matches) === 1) {
+                $response = ApiResponse::json(200, ['data' => $detail]);
+            } elseif ($context->method === 'DELETE' && preg_match('#^/api/v1/short-urls/([A-Za-z0-9_-]{4,16})$#', $context->path, $matches) === 1) {
+                $route = 'disable_short_url';
                 $this->service->disable($matches[1]);
-
-                return ApiResponse::noContent();
+                $response = ApiResponse::noContent();
+            } elseif ($context->method === 'GET' && $context->path === '/api/v1/admin/short-urls') {
+                $route = 'admin_list_short_urls';
+                $response = $this->listShortUrls($query, $context);
+            } elseif ($context->method === 'POST' && $context->path === '/api/v1/admin/short-urls/bulk-disable') {
+                $route = 'admin_bulk_disable';
+                $response = $this->bulkDisable($body, $context);
+            } else {
+                $response = $this->errorFactory->build(
+                    statusCode: 404,
+                    code: ErrorCode::ROUTE_NOT_FOUND,
+                    message: 'Route not found.',
+                    traceId: $traceId
+                );
             }
-
-            if ($context->method === 'GET' && $context->path === '/api/v1/admin/short-urls') {
-                return $this->listShortUrls($query, $context);
-            }
-
-            if ($context->method === 'POST' && $context->path === '/api/v1/admin/short-urls/bulk-disable') {
-                return $this->bulkDisable($body, $context);
-            }
-
-            return ApiResponse::json(404, ['error' => 'Route not found.']);
         } catch (ValidationException $exception) {
-            return ApiResponse::json(422, ['error' => $exception->getMessage()]);
+            $response = $this->errorFactory->fromException($exception, 422, $traceId);
         } catch (ConflictException $exception) {
-            return ApiResponse::json(409, ['error' => $exception->getMessage()]);
+            $response = $this->errorFactory->fromException($exception, 409, $traceId);
         } catch (RateLimitException $exception) {
-            return ApiResponse::json(429, ['error' => $exception->getMessage()]);
+            $response = $this->errorFactory->fromException($exception, 429, $traceId);
         } catch (UnauthorizedException $exception) {
-            return ApiResponse::json(401, ['error' => $exception->getMessage()]);
+            $response = $this->errorFactory->fromException($exception, 401, $traceId);
         } catch (NotFoundException $exception) {
-            return ApiResponse::json(404, ['error' => $exception->getMessage()]);
+            $response = $this->errorFactory->fromException($exception, 404, $traceId);
         } catch (InactiveShortUrlException $exception) {
-            return ApiResponse::json(410, ['error' => $exception->getMessage()]);
+            $response = $this->errorFactory->fromException($exception, 410, $traceId);
         } catch (Throwable $exception) {
-            return ApiResponse::json(500, ['error' => 'Internal server error.', 'detail' => $exception->getMessage()]);
+            $response = $this->errorFactory->fromThrowable($exception, $traceId);
+            $logger->error('Unhandled API error', [
+                'trace_id' => $traceId,
+                'method' => $method,
+                'path' => $context->path,
+                'error' => $exception->getMessage(),
+            ]);
+        } finally {
+            $durationSeconds = (hrtime(true) - $startedAtNs) / 1_000_000_000;
+            $statusCode = $response?->statusCode ?? 500;
+            $errorClass = (string) intdiv($statusCode, 100) . 'xx';
+            $metrics->incrementCounter(
+                name: 'shorturl_http_requests_total',
+                labels: [
+                    'method' => $method,
+                    'route' => $route,
+                    'status_code' => (string) $statusCode,
+                    'error_class' => $errorClass,
+                ],
+                help: 'Total HTTP requests processed by short URL API.'
+            );
+            $metrics->observeHistogram(
+                name: 'shorturl_http_request_duration_seconds',
+                value: $durationSeconds,
+                labels: [
+                    'method' => $method,
+                    'route' => $route,
+                ],
+                help: 'Latency histogram for HTTP requests.'
+            );
+            $this->inFlightRequests = max(0, $this->inFlightRequests - 1);
+            $metrics->setGauge(
+                name: 'shorturl_http_in_flight_requests',
+                value: (float) $this->inFlightRequests,
+                help: 'Number of currently processing HTTP requests.'
+            );
+            $logContext = [
+                'trace_id' => $traceId,
+                'method' => $method,
+                'path' => $context->path,
+                'route' => $route,
+                'status_code' => $statusCode,
+                'duration_ms' => round($durationSeconds * 1000, 3),
+                'client_ip' => $context->clientIp,
+            ];
+            if ($statusCode >= 500) {
+                $logger->error('HTTP request failed', $logContext);
+            } elseif ($statusCode >= 400) {
+                $logger->warning('HTTP request rejected', $logContext);
+            } else {
+                $logger->info('HTTP request handled', $logContext);
+            }
         }
+
+        return $this->withTrace(
+            $response ?? $this->errorFactory->build(500, ErrorCode::INTERNAL_SERVER_ERROR, 'Internal server error.', $traceId),
+            $traceId
+        );
     }
 
     /**
@@ -203,14 +322,57 @@ final class ShortUrlApiController
 
     private function assertAdminAuthorized(RequestContext $context): void
     {
-        $expected = $this->adminApiKey;
-        if ($expected === null || trim($expected) === '') {
+        $allowedKeys = $this->resolveAllowedAdminKeys();
+        if ($allowedKeys === []) {
             return;
         }
 
-        $provided = $context->headers['x-admin-api-key'] ?? '';
-        if (!is_string($provided) || $provided === '' || !hash_equals($expected, $provided)) {
+        $provided = $context->headers['x-admin-api-key'] ?? null;
+        if (!is_string($provided) || $provided === '') {
             throw new UnauthorizedException('Invalid admin API key.');
         }
+
+        foreach ($allowedKeys as $allowedKey) {
+            if (hash_equals($allowedKey, $provided)) {
+                return;
+            }
+        }
+
+        throw new UnauthorizedException('Invalid admin API key.');
     }
+
+    /**
+     * @return list<string>
+     */
+    private function resolveAllowedAdminKeys(): array
+    {
+        $envKeysRaw = getenv('ADMIN_API_KEYS');
+        if (is_string($envKeysRaw) && trim($envKeysRaw) !== '') {
+            $keys = array_values(array_filter(array_map(
+                static fn (string $key): string => trim($key),
+                explode(',', $envKeysRaw)
+            ), static fn (string $key): bool => $key !== ''));
+
+            if ($keys !== []) {
+                return $keys;
+            }
+        }
+
+        if ($this->adminApiKey === null || trim($this->adminApiKey) === '') {
+            return [];
+        }
+
+        return [trim($this->adminApiKey)];
+    }
+
+    private function withTrace(ApiResponse $response, string $traceId): ApiResponse
+    {
+        $headers = $response->headers;
+        if (!isset($headers['X-Trace-Id']) && !isset($headers['x-trace-id'])) {
+            $headers['X-Trace-Id'] = $traceId;
+        }
+
+        return new ApiResponse($response->statusCode, $response->body, $headers);
+    }
+
 }

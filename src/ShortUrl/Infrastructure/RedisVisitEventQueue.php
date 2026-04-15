@@ -91,6 +91,56 @@ final class RedisVisitEventQueue implements VisitEventQueueInterface
         return $result;
     }
 
+    public function reclaimPending(int $count = 100, int $minIdleMs = 60000): array
+    {
+        $this->ensureConsumerGroup();
+
+        try {
+            $result = $this->redis->xautoclaim(
+                $this->stream,
+                $this->consumerGroup,
+                $this->consumerName,
+                $minIdleMs,
+                '0-0',
+                $count
+            );
+        } catch (Throwable) {
+            return [];
+        }
+
+        if (!is_array($result) || count($result) < 2 || !is_array($result[1])) {
+            return [];
+        }
+
+        $messages = $result[1];
+        $parsed = [];
+        foreach ($messages as $entry) {
+            if (!is_array($entry) || count($entry) < 2) {
+                continue;
+            }
+
+            $id = (string) ($entry[0] ?? '');
+            $values = $entry[1] ?? null;
+            if ($id === '' || !is_array($values)) {
+                continue;
+            }
+
+            $parsed[] = [
+                'id' => $id,
+                'values' => [
+                    'short_url_code' => (string) ($values['short_url_code'] ?? ''),
+                    'visited_at' => (string) ($values['visited_at'] ?? ''),
+                    'client_ip' => (string) ($values['client_ip'] ?? ''),
+                    'user_agent' => (string) ($values['user_agent'] ?? ''),
+                    'event_key' => (string) ($values['event_key'] ?? ''),
+                    'attempt' => max(1, (int) ($values['attempt'] ?? 1)),
+                ],
+            ];
+        }
+
+        return $parsed;
+    }
+
     /**
      * @param list<string> $messageIds
      */
@@ -128,6 +178,48 @@ final class RedisVisitEventQueue implements VisitEventQueueInterface
             'failed_reason' => mb_substr($reason, 0, 255),
             'failed_at' => (new \DateTimeImmutable())->format(DATE_ATOM),
         ]);
+    }
+
+    public function reclaim(int $minIdleMs = 60000, int $count = 100): array
+    {
+        $this->ensureConsumerGroup();
+        $safeIdle = max(1, $minIdleMs);
+        $safeCount = max(1, $count);
+
+        $response = $this->redis->xautoclaim(
+            $this->stream,
+            $this->consumerGroup,
+            $this->consumerName,
+            $safeIdle,
+            '0-0',
+            $safeCount
+        );
+
+        if (!is_array($response) || !isset($response[1]) || !is_array($response[1])) {
+            return [];
+        }
+
+        $entries = $response[1];
+        $result = [];
+        foreach ($entries as $id => $values) {
+            if (!is_string($id) || !is_array($values)) {
+                continue;
+            }
+
+            $result[] = [
+                'id' => $id,
+                'values' => [
+                    'short_url_code' => (string) ($values['short_url_code'] ?? ''),
+                    'visited_at' => (string) ($values['visited_at'] ?? ''),
+                    'client_ip' => (string) ($values['client_ip'] ?? ''),
+                    'user_agent' => (string) ($values['user_agent'] ?? ''),
+                    'event_key' => (string) ($values['event_key'] ?? ''),
+                    'attempt' => max(1, (int) ($values['attempt'] ?? 1)),
+                ],
+            ];
+        }
+
+        return $result;
     }
 
     private function ensureConsumerGroup(): void

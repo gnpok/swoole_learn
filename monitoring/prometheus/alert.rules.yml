@@ -1,0 +1,41 @@
+groups:
+  - name: shorturl-api-alerts
+    rules:
+      - alert: ShortUrlApiHigh5xxRatio
+        expr: |
+          (
+            sum(rate(shorturl_http_requests_total{status_code=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(shorturl_http_requests_total[5m])), 0.001)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          service: shorturl-api
+        annotations:
+          summary: "Short URL API 5xx ratio is high"
+          description: "5xx ratio > 5% for 5m on short URL API."
+
+      - alert: ShortUrlApiP95LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(shorturl_http_request_duration_seconds_bucket[5m]))
+          ) > 0.25
+        for: 5m
+        labels:
+          severity: warning
+          service: shorturl-api
+        annotations:
+          summary: "Short URL API p95 latency is high"
+          description: "API p95 latency > 250ms for 5m."
+
+      - alert: ShortUrlWorkerDeadLetterGrowth
+        expr: increase(shorturl_worker_dead_letter_total[10m]) > 10
+        for: 10m
+        labels:
+          severity: critical
+          service: shorturl-worker
+        annotations:
+          summary: "Short URL worker dead-letter growth detected"
+          description: "More than 10 events moved to DLQ in 10m."

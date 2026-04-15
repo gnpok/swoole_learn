@@ -56,4 +56,18 @@ interface VisitEventQueueInterface
      * } $event
      */
     public function deadLetter(array $event, int $attempt, string $reason): string;
+
+    /**
+     * Attempt to reclaim stale pending messages from other consumers.
+     *
+     * @return list<array{id: string, values: array{
+     *   short_url_code: string,
+     *   visited_at: string,
+     *   client_ip: string,
+     *   user_agent: string,
+     *   event_key: string,
+     *   attempt: int
+     * }}>
+     */
+    public function reclaim(int $minIdleMs = 60000, int $count = 100): array;
 }

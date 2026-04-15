@@ -36,4 +36,17 @@ final class ApiResponse
     {
         return new self(204, '', []);
     }
+
+    /**
+     * @param array<string, string> $headers
+     */
+    public static function text(int $statusCode, string $body, array $headers = []): self
+    {
+        $merged = ['Content-Type' => 'text/plain; charset=utf-8'];
+        foreach ($headers as $key => $value) {
+            $merged[$key] = $value;
+        }
+
+        return new self($statusCode, $body, $merged);
+    }
 }

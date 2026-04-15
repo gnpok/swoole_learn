@@ -15,11 +15,16 @@ use SwooleLearn\ShortUrl\Contracts\StatsStoreInterface;
 use SwooleLearn\ShortUrl\Contracts\VisitEventQueueInterface;
 use SwooleLearn\ShortUrl\Entity\ShortUrlListItem;
 use SwooleLearn\ShortUrl\Entity\ShortUrlRecord;
-use SwooleLearn\ShortUrl\Exception\ConflictException;
+use SwooleLearn\ShortUrl\Exception\ConflictShortCodeException;
 use SwooleLearn\ShortUrl\Exception\InactiveShortUrlException;
 use SwooleLearn\ShortUrl\Exception\NotFoundException;
 use SwooleLearn\ShortUrl\Exception\RateLimitException;
 use SwooleLearn\ShortUrl\Exception\ValidationException;
+use SwooleLearn\ShortUrl\Observability\LoggerInterface;
+use SwooleLearn\ShortUrl\Observability\MetricsCollectorInterface;
+use SwooleLearn\ShortUrl\Observability\NullLogger;
+use SwooleLearn\ShortUrl\Observability\NullMetricsCollector;
+use Throwable;
 
 final class ShortUrlService
 {
@@ -28,6 +33,8 @@ final class ShortUrlService
     private const MAX_GENERATE_ATTEMPTS = 12;
 
     private Closure $clock;
+    private MetricsCollectorInterface $metricsCollector;
+    private LoggerInterface $logger;
 
     public function __construct(
         private readonly ShortUrlRepositoryInterface $repository,
@@ -40,11 +47,15 @@ final class ShortUrlService
         private readonly string $publicBaseUrl,
         ?callable $clock = null,
         private readonly int $createLimit = 30,
-        private readonly int $createWindowSeconds = 60
+        private readonly int $createWindowSeconds = 60,
+        ?MetricsCollectorInterface $metrics = null,
+        ?LoggerInterface $logger = null
     ) {
         $this->clock = $clock instanceof Closure
             ? $clock
             : Closure::fromCallable($clock ?? static fn (): DateTimeImmutable => new DateTimeImmutable());
+        $this->metricsCollector = $metrics ?? new NullMetricsCollector();
+        $this->logger = $logger ?? new NullLogger();
     }
 
     public function create(
@@ -53,34 +64,60 @@ final class ShortUrlService
         ?DateTimeImmutable $expiresAt = null,
         string $clientIp = '0.0.0.0'
     ): ShortUrlRecord {
-        $this->assertCreateRateLimit($clientIp);
+        $startedAtNs = hrtime(true);
+        try {
+            $this->assertCreateRateLimit($clientIp);
 
-        $originalUrl = trim($originalUrl);
-        $this->assertValidUrl($originalUrl);
+            $originalUrl = trim($originalUrl);
+            $this->assertValidUrl($originalUrl);
 
-        $now = ($this->clock)();
-        if ($expiresAt !== null && $expiresAt <= $now) {
-            throw new ValidationException('expires_at must be a future datetime.');
+            $now = ($this->clock)();
+            if ($expiresAt !== null && $expiresAt <= $now) {
+                throw new ValidationException('expires_at must be a future datetime.');
+            }
+
+            $code = $customCode === null || trim($customCode) === ''
+                ? $this->generateUniqueCode()
+                : $this->useCustomCode($customCode);
+
+            $saved = $this->repository->save(new ShortUrlRecord(
+                id: null,
+                code: $code,
+                originalUrl: $originalUrl,
+                createdAt: $now,
+                expiresAt: $expiresAt,
+                isActive: true,
+                totalVisits: 0,
+                lastVisitedAt: null
+            ));
+
+            $this->cache->put($saved, $this->calculateTtl($saved, $now));
+            $this->metricsCollector->incrementCounter(
+                name: 'shorturl_service_create_total',
+                labels: ['result' => 'success'],
+                help: 'Create short URL attempts grouped by result.'
+            );
+
+            return $saved;
+        } catch (Throwable $throwable) {
+            $this->metricsCollector->incrementCounter(
+                name: 'shorturl_service_create_total',
+                labels: ['result' => 'error', 'error_type' => $throwable::class],
+                help: 'Create short URL attempts grouped by result.'
+            );
+            $this->logger->warning('Short URL create failed', [
+                'client_ip' => $clientIp,
+                'error' => $throwable->getMessage(),
+                'error_type' => $throwable::class,
+            ]);
+            throw $throwable;
+        } finally {
+            $this->metricsCollector->observeHistogram(
+                name: 'shorturl_service_create_duration_seconds',
+                value: (hrtime(true) - $startedAtNs) / 1_000_000_000,
+                help: 'Duration histogram for create short URL operation.'
+            );
         }
-
-        $code = $customCode === null || trim($customCode) === ''
-            ? $this->generateUniqueCode()
-            : $this->useCustomCode($customCode);
-
-        $saved = $this->repository->save(new ShortUrlRecord(
-            id: null,
-            code: $code,
-            originalUrl: $originalUrl,
-            createdAt: $now,
-            expiresAt: $expiresAt,
-            isActive: true,
-            totalVisits: 0,
-            lastVisitedAt: null
-        ));
-
-        $this->cache->put($saved, $this->calculateTtl($saved, $now));
-
-        return $saved;
     }
 
     public function createIdempotent(
@@ -121,39 +158,66 @@ final class ShortUrlService
 
     public function resolve(string $code, string $clientIp, string $userAgent = ''): ShortUrlRecord
     {
-        $record = $this->loadRecord($this->normalizeCode($code));
-        $now = ($this->clock)();
+        $startedAtNs = hrtime(true);
+        try {
+            $record = $this->loadRecord($this->normalizeCode($code));
+            $now = ($this->clock)();
 
-        if (!$record->isActive) {
-            throw new InactiveShortUrlException('Short URL has been disabled.');
+            if (!$record->isActive) {
+                throw new InactiveShortUrlException('Short URL has been disabled.');
+            }
+
+            if ($record->isExpired($now)) {
+                throw new InactiveShortUrlException('Short URL has expired.');
+            }
+
+            $this->repository->incrementVisits($record->code, $now);
+            $eventKey = $this->buildVisitEventKey($record->code, $now, $clientIp, $userAgent);
+            $visitPayload = [
+                'short_url_code' => $record->code,
+                'visited_at' => $now->format(DATE_ATOM),
+                'client_ip' => $clientIp,
+                'user_agent' => $userAgent,
+                'event_key' => $eventKey,
+                'attempt' => 1,
+            ];
+            $this->visitEventQueue->push($visitPayload);
+            $this->statsStore->increment($record->code);
+            $this->statsStore->addRecentVisit($record->code, [
+                'visited_at' => $now->format(DATE_ATOM),
+                'client_ip' => $clientIp,
+                'user_agent' => $userAgent,
+            ]);
+
+            $updated = $record->withVisit($now);
+            $this->cache->put($updated, $this->calculateTtl($updated, $now));
+            $this->metricsCollector->incrementCounter(
+                name: 'shorturl_service_resolve_total',
+                labels: ['result' => 'success'],
+                help: 'Resolve short URL attempts grouped by result.'
+            );
+
+            return $updated;
+        } catch (Throwable $throwable) {
+            $this->metricsCollector->incrementCounter(
+                name: 'shorturl_service_resolve_total',
+                labels: ['result' => 'error', 'error_type' => $throwable::class],
+                help: 'Resolve short URL attempts grouped by result.'
+            );
+            $this->logger->warning('Short URL resolve failed', [
+                'code' => $code,
+                'client_ip' => $clientIp,
+                'error' => $throwable->getMessage(),
+                'error_type' => $throwable::class,
+            ]);
+            throw $throwable;
+        } finally {
+            $this->metricsCollector->observeHistogram(
+                name: 'shorturl_service_resolve_duration_seconds',
+                value: (hrtime(true) - $startedAtNs) / 1_000_000_000,
+                help: 'Duration histogram for resolve operation.'
+            );
         }
-
-        if ($record->isExpired($now)) {
-            throw new InactiveShortUrlException('Short URL has expired.');
-        }
-
-        $this->repository->incrementVisits($record->code, $now);
-        $eventKey = $this->buildVisitEventKey($record->code, $now, $clientIp, $userAgent);
-        $visitPayload = [
-            'short_url_code' => $record->code,
-            'visited_at' => $now->format(DATE_ATOM),
-            'client_ip' => $clientIp,
-            'user_agent' => $userAgent,
-            'event_key' => $eventKey,
-            'attempt' => 1,
-        ];
-        $this->visitEventQueue->push($visitPayload);
-        $this->statsStore->increment($record->code);
-        $this->statsStore->addRecentVisit($record->code, [
-            'visited_at' => $now->format(DATE_ATOM),
-            'client_ip' => $clientIp,
-            'user_agent' => $userAgent,
-        ]);
-
-        $updated = $record->withVisit($now);
-        $this->cache->put($updated, $this->calculateTtl($updated, $now));
-
-        return $updated;
     }
 
     /**
@@ -304,7 +368,7 @@ final class ShortUrlService
         $code = $this->normalizeCode($customCode);
 
         if ($this->repository->existsByCode($code)) {
-            throw new ConflictException(sprintf('Code "%s" already exists.', $code));
+            throw new ConflictShortCodeException(sprintf('Code "%s" already exists.', $code));
         }
 
         return $code;
@@ -319,7 +383,7 @@ final class ShortUrlService
             }
         }
 
-        throw new ConflictException('Unable to allocate short code after multiple attempts.');
+        throw new ConflictShortCodeException('Unable to allocate short code after multiple attempts.');
     }
 
     private function normalizeCode(string $code): string
@@ -337,8 +401,18 @@ final class ShortUrlService
     {
         $cached = $this->cache->get($code);
         if ($cached !== null) {
+            $this->metricsCollector->incrementCounter(
+                name: 'shorturl_cache_lookup_total',
+                labels: ['result' => 'hit'],
+                help: 'Short URL metadata cache lookup result.'
+            );
             return $cached;
         }
+        $this->metricsCollector->incrementCounter(
+            name: 'shorturl_cache_lookup_total',
+            labels: ['result' => 'miss'],
+            help: 'Short URL metadata cache lookup result.'
+        );
 
         $record = $this->repository->findByCode($code);
         if ($record === null) {

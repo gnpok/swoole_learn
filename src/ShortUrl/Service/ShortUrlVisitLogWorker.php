@@ -7,6 +7,10 @@ namespace SwooleLearn\ShortUrl\Service;
 use DateTimeImmutable;
 use SwooleLearn\ShortUrl\Contracts\ShortUrlRepositoryInterface;
 use SwooleLearn\ShortUrl\Contracts\VisitEventQueueInterface;
+use SwooleLearn\ShortUrl\Observability\LoggerInterface;
+use SwooleLearn\ShortUrl\Observability\MetricsCollectorInterface;
+use SwooleLearn\ShortUrl\Observability\NullLogger;
+use SwooleLearn\ShortUrl\Observability\NullMetricsCollector;
 use Throwable;
 
 final class ShortUrlVisitLogWorker
@@ -14,16 +18,55 @@ final class ShortUrlVisitLogWorker
     public function __construct(
         private readonly VisitEventQueueInterface $queue,
         private readonly ShortUrlRepositoryInterface $repository,
-        private readonly int $maxAttempts = 5
+        private readonly int $maxAttempts = 5,
+        private readonly ?MetricsCollectorInterface $metrics = null,
+        private readonly ?LoggerInterface $logger = null
     ) {
     }
 
-    public function processOnce(int $batchSize = 100, int $blockMs = 1000): int
+    public function processOnce(
+        int $batchSize = 100,
+        int $blockMs = 1000,
+        int $reclaimIdleMs = 60000,
+        int $reclaimCount = 100
+    ): int
     {
+        $startedAtNs = hrtime(true);
+        $metrics = $this->metrics ?? new NullMetricsCollector();
+        $logger = $this->logger ?? new NullLogger();
         $events = $this->queue->consume($batchSize, $blockMs);
         if ($events === []) {
+            $events = $this->queue->reclaim(
+                minIdleMs: max(1, $reclaimIdleMs),
+                count: max(1, $reclaimCount)
+            );
+            if ($events !== []) {
+                $metrics->incrementCounter(
+                    name: 'shorturl_worker_reclaimed_total',
+                    value: (float) count($events),
+                    labels: ['source' => 'pending'],
+                    help: 'Messages reclaimed from pending entries list.'
+                );
+            }
+        }
+        if ($events === []) {
+            $metrics->incrementCounter(
+                name: 'shorturl_worker_poll_total',
+                labels: ['result' => 'empty'],
+                help: 'Worker poll operations grouped by result.'
+            );
             return 0;
         }
+        $metrics->incrementCounter(
+            name: 'shorturl_worker_poll_total',
+            labels: ['result' => 'non_empty'],
+            help: 'Worker poll operations grouped by result.'
+        );
+        $metrics->setGauge(
+            name: 'shorturl_worker_last_batch_size',
+            value: (float) count($events),
+            help: 'Number of messages in latest polled batch.'
+        );
 
         $validEvents = [];
         $ackedIds = [];
@@ -34,6 +77,11 @@ final class ShortUrlVisitLogWorker
                 if ($messageId !== '') {
                     $ackedIds[] = $messageId;
                 }
+                $metrics->incrementCounter(
+                    name: 'shorturl_worker_invalid_events_total',
+                    labels: ['reason' => 'schema'],
+                    help: 'Invalid events discarded by worker.'
+                );
                 continue;
             }
 
@@ -57,6 +105,12 @@ final class ShortUrlVisitLogWorker
                     $validEvents
                 );
                 $processed = $this->repository->appendVisitLogsBatch($batchPayloads);
+                $metrics->incrementCounter(
+                    name: 'shorturl_worker_events_processed_total',
+                    value: (float) $processed,
+                    labels: ['mode' => 'batch', 'result' => 'success'],
+                    help: 'Events processed by visit log worker.'
+                );
                 foreach ($validEvents as $event) {
                     if ($event['id'] !== '') {
                         $ackedIds[] = $event['id'];
@@ -74,6 +128,11 @@ final class ShortUrlVisitLogWorker
                             userAgent: $values['user_agent']
                         );
                         $processed++;
+                        $metrics->incrementCounter(
+                            name: 'shorturl_worker_events_processed_total',
+                            labels: ['mode' => 'single', 'result' => 'success'],
+                            help: 'Events processed by visit log worker.'
+                        );
                     } catch (Throwable $singleException) {
                         $attempt = max(1, (int) $values['attempt']);
                         if ($attempt < $this->maxAttempts) {
@@ -84,6 +143,17 @@ final class ShortUrlVisitLogWorker
                                 'user_agent' => $values['user_agent'],
                                 'event_key' => $values['event_key'],
                             ], $attempt + 1, $singleException->getMessage());
+                            $metrics->incrementCounter(
+                                name: 'shorturl_worker_retry_total',
+                                labels: ['result' => 'queued'],
+                                help: 'Worker retries scheduled for failed events.'
+                            );
+                            $logger->warning('Visit log event scheduled for retry', [
+                                'short_url_code' => $values['short_url_code'],
+                                'event_key' => $values['event_key'],
+                                'attempt' => $attempt + 1,
+                                'error' => $singleException->getMessage(),
+                            ]);
                         } else {
                             $this->queue->deadLetter([
                                 'short_url_code' => $values['short_url_code'],
@@ -92,6 +162,17 @@ final class ShortUrlVisitLogWorker
                                 'user_agent' => $values['user_agent'],
                                 'event_key' => $values['event_key'],
                             ], $attempt, $singleException->getMessage());
+                            $metrics->incrementCounter(
+                                name: 'shorturl_worker_dead_letter_total',
+                                labels: ['result' => 'queued'],
+                                help: 'Events sent to dead letter queue by worker.'
+                            );
+                            $logger->error('Visit log event moved to dead letter queue', [
+                                'short_url_code' => $values['short_url_code'],
+                                'event_key' => $values['event_key'],
+                                'attempt' => $attempt,
+                                'error' => $singleException->getMessage(),
+                            ]);
                         }
                     }
 
@@ -104,7 +185,17 @@ final class ShortUrlVisitLogWorker
 
         if ($ackedIds !== []) {
             $this->queue->ack(array_values(array_unique($ackedIds)));
+            $metrics->incrementCounter(
+                name: 'shorturl_worker_acks_total',
+                value: (float) count($ackedIds),
+                help: 'Acked message IDs by visit log worker.'
+            );
         }
+        $metrics->observeHistogram(
+            name: 'shorturl_worker_process_duration_seconds',
+            value: (hrtime(true) - $startedAtNs) / 1_000_000_000,
+            help: 'Duration histogram for worker processOnce.'
+        );
 
         return $processed;
     }

@@ -17,6 +17,7 @@
 - 提供后台管理接口（分页筛选、批量禁用）
 - 管理端接口 API Key 鉴权（`X-Admin-Api-Key`）
 - 访问日志支持批量落库、重试、死信队列（DLQ）
+- 可观测性基础能力（指标、结构化日志、trace id、就绪探针）
 
 ---
 
@@ -149,6 +150,58 @@ Base URL 示例：`http://127.0.0.1:9501`
 }
 ```
 
+鉴权说明：
+- 管理端接口使用 `X-Admin-Api-Key`
+- 支持通过环境变量配置多个 key：`ADMIN_API_KEYS=tenantA:keyA,tenantB:keyB`
+- 若同时配置了 `ADMIN_API_KEY`，系统也会兼容单 key 模式
+- key 可并行保留以实现平滑轮换（旧 key 与新 key 一段时间共存）
+
+#### 2.8 健康检查
+
+- **GET** `/health`
+  - 轻量存活探针（liveness）
+  - 响应示例：
+
+```json
+{
+  "status": "ok",
+  "service": "short-url-api",
+  "timestamp": "2026-04-14T12:00:00+00:00"
+}
+```
+
+- **GET** `/readyz`
+  - 就绪探针（readiness），执行 MySQL/Redis 依赖检查
+  - 当任一核心依赖 down 时返回 `503`
+  - 响应示例：
+
+```json
+{
+  "status": "up",
+  "timestamp": "2026-04-14T12:00:00+00:00",
+  "checks": {
+    "mysql": {
+      "status": "up",
+      "latency_ms": 1.2
+    },
+    "redis": {
+      "status": "up",
+      "latency_ms": 0.4,
+      "details": {
+        "ping": "PONG"
+      }
+    }
+  }
+}
+```
+
+#### 2.9 指标导出
+
+- **GET** `/metrics`
+  - 输出 Prometheus 文本格式（`text/plain; version=0.0.4`）
+  - 适合被 Prometheus / VictoriaMetrics 拉取
+  - 指标包括 HTTP 请求量、延迟分布、in-flight 请求、服务层 create/resolve、worker 消费处理等
+
 ---
 
 ### 3. MySQL 表设计（核心）
@@ -257,10 +310,74 @@ SQL 文件：`database/mysql/short_url_schema.sql`
 - API 请求只入队，不同步写 `short_url_visits`
 - Worker 优先批量落库，失败自动降级单条写入
 - 单条写入失败会重试，超过阈值进入 DLQ（`shorturl:visit:stream:dlq`）
+- Worker 会在主队列为空时通过 `XAUTOCLAIM` 回收 pending（长时间未 ack）消息继续处理
 
 ---
 
-### 5. Swoole 架构说明
+### 5. 可观测性设计（Observability Tier-1）
+
+#### 5.1 日志（Logs）
+
+- API 与 Worker 统一输出 JSON 结构化日志
+- 每条日志包含：
+  - `timestamp`
+  - `level`
+  - `message`
+  - `context`（关键业务维度）
+- API 请求日志 `context` 包含：
+  - `trace_id`
+  - `method`
+  - `path`
+  - `route`
+  - `status_code`
+  - `duration_ms`
+  - `client_ip`
+- Worker 异常日志包含：
+  - `short_url_code`
+  - `event_key`
+  - `attempt`
+  - `error`
+
+#### 5.2 指标（Metrics）
+
+关键指标（部分）：
+
+- HTTP 层
+  - `shorturl_http_requests_total{method,route,status_code}`
+  - `shorturl_http_request_duration_seconds{method,route}`
+  - `shorturl_http_in_flight_requests`
+- Service 层
+  - `shorturl_service_create_total{result,error_type?}`
+  - `shorturl_service_create_duration_seconds`
+  - `shorturl_service_resolve_total{result,error_type?}`
+  - `shorturl_service_resolve_duration_seconds`
+  - `shorturl_cache_lookup_total{result=hit|miss}`
+- Worker 层
+  - `shorturl_worker_poll_total{result}`
+  - `shorturl_worker_last_batch_size`
+  - `shorturl_worker_events_processed_total{mode,result}`
+  - `shorturl_worker_retry_total{result}`
+  - `shorturl_worker_dead_letter_total{result}`
+  - `shorturl_worker_acks_total`
+  - `shorturl_worker_invalid_events_total{reason}`
+  - `shorturl_worker_process_duration_seconds`
+
+#### 5.3 Trace 关联（Trace ID）
+
+- API 支持从请求头透传 `X-Trace-Id`
+- 若未提供，将自动生成 trace id 并在响应头回传 `X-Trace-Id`
+- 推荐网关层统一注入 trace id，实现跨服务关联检索
+
+#### 5.4 Worker 指标快照（stdout）
+
+- Worker 为无 HTTP 端点进程，支持按轮次将 Prometheus 指标快照打印到 stdout
+- 配置：
+  - `WORKER_METRICS_SNAPSHOT_EVERY=100`（每处理 100 次循环输出一次）
+- 便于日志采集系统抓取后转发至指标管道（或调试观察）
+
+---
+
+### 6. Swoole 架构说明
 
 入口：`examples/short_url_api_server.php`
 
@@ -277,7 +394,7 @@ SQL 文件：`database/mysql/short_url_schema.sql`
 
 ---
 
-### 6. 环境变量
+### 7. 环境变量
 
 示例：
 
@@ -298,6 +415,7 @@ export REDIS_DATABASE=0
 export REDIS_VISIT_STREAM=shorturl:visit:stream
 export REDIS_VISIT_DLQ_STREAM=shorturl:visit:stream:dlq
 export ADMIN_API_KEY=replace-with-strong-key
+export WORKER_METRICS_SNAPSHOT_EVERY=0
 ```
 
 启动：
@@ -314,7 +432,7 @@ php examples/short_url_visit_log_worker.php
 
 ---
 
-### 7. 生产优化建议（进阶）
+### 8. 生产优化建议（进阶）
 
 1. **访问日志异步化**
    - 已实现 Redis Stream 入队 + Worker 消费模式，可按实例横向扩展 Worker。
@@ -331,7 +449,7 @@ php examples/short_url_visit_log_worker.php
 
 ---
 
-### 8. 测试策略
+### 9. 测试策略
 
 本项目单测不依赖 ext-swoole、MySQL、Redis 实例，通过 fake 实现验证：
 

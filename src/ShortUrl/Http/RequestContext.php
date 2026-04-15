@@ -18,7 +18,8 @@ final class RequestContext
         public readonly ?array $body = null,
         public readonly string $clientIp = '0.0.0.0',
         public readonly string $userAgent = '',
-        public readonly array $headers = []
+        public readonly array $headers = [],
+        public readonly string $traceId = ''
     ) {
     }
 }
