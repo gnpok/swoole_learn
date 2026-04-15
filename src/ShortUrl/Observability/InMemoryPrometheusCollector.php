@@ -23,7 +23,7 @@ final class InMemoryPrometheusCollector implements MetricsCollectorInterface
     /**
      * @var array<string, array<string, array{
      *   labels: array<string, string>,
-     *   buckets: array<float, int>,
+     *   buckets: array<string, int>,
      *   count: int,
      *   sum: float
      * }>>
@@ -60,7 +60,7 @@ final class InMemoryPrometheusCollector implements MetricsCollectorInterface
         if (!isset($this->histograms[$name][$key])) {
             $bucketMap = [];
             foreach ($normalizedBuckets as $bucket) {
-                $bucketMap[(float) $bucket] = 0;
+                $bucketMap[(string) $bucket] = 0;
             }
 
             $this->histograms[$name][$key] = [

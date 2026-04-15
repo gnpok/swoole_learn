@@ -317,6 +317,8 @@ final class ShortUrlServiceTest extends TestCase
         );
 
         $record = $service->create('https://example.com/metrics');
+        // Evict once to force a cache miss path before subsequent cache hits.
+        $cache->forget($record->code);
         $service->resolve($record->code, '127.0.0.1', 'phpunit');
         $service->getDetail($record->code);
         $service->getDetail($record->code);
