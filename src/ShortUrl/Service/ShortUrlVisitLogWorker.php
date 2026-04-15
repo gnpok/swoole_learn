@@ -22,6 +22,9 @@ final class ShortUrlVisitLogWorker
     {
         $events = $this->queue->consume($batchSize, $blockMs);
         if ($events === []) {
+            $events = $this->queue->reclaim(60000, $batchSize);
+        }
+        if ($events === []) {
             return 0;
         }
 

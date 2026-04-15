@@ -672,6 +672,11 @@ final class FakeVisitEventQueue implements VisitEventQueueInterface
         return array_splice($this->consumable, 0, $count);
     }
 
+    public function autoClaim(int $count = 100, int $minIdleMs = 60000): array
+    {
+        return [];
+    }
+
     public function ack(array $messageIds): void
     {
         foreach ($messageIds as $id) {

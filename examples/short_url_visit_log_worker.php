@@ -21,6 +21,7 @@ $redis = new Client([
 $queue = new RedisVisitEventQueue(
     redis: $redis,
     stream: getenv('REDIS_VISIT_STREAM') ?: 'shorturl:visit:stream',
+    retryStream: getenv('REDIS_VISIT_RETRY_STREAM') ?: 'shorturl:visit:stream:retry',
     deadLetterStream: getenv('REDIS_VISIT_DLQ_STREAM') ?: 'shorturl:visit:stream:dlq',
     consumerGroup: getenv('VISIT_LOG_CONSUMER_GROUP') ?: 'visit-log-workers',
     consumerName: getenv('VISIT_LOG_CONSUMER_NAME') ?: 'worker-1'

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Swoole Short URL Service API
-  version: 1.1.0
+  version: 1.2.0
   description: |
     Production-like short URL API specification with async visit log worker,
     idempotent create, and admin-protected management endpoints.
@@ -14,6 +14,10 @@ paths:
       responses:
         '200':
           description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
   /api/v1/short-urls:
     post:
       summary: Create short URL
@@ -42,12 +46,28 @@ paths:
       responses:
         '201':
           description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateShortUrlResponse'
         '409':
           description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '422':
           description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '429':
           description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /r/{code}:
     get:
       summary: Redirect to original URL
@@ -72,8 +92,16 @@ paths:
       responses:
         '200':
           description: Listed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminShortUrlListResponse'
         '401':
           description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/admin/short-urls/bulk-disable:
     post:
       summary: Disable short URLs in bulk
@@ -82,11 +110,120 @@ paths:
       responses:
         '200':
           description: Bulk disabled result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkDisableResponse'
         '401':
           description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 components:
   securitySchemes:
     AdminApiKey:
       type: apiKey
       in: header
       name: X-Admin-Api-Key
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+    ShortUrlData:
+      type: object
+      required: [code, short_url, original_url, created_at, is_active]
+      properties:
+        code:
+          type: string
+        short_url:
+          type: string
+        original_url:
+          type: string
+          format: uri
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+        is_active:
+          type: boolean
+    CreateShortUrlResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/ShortUrlData'
+    AdminShortUrlListItem:
+      type: object
+      required:
+        [code, short_url, original_url, is_active, total_visits, created_at]
+      properties:
+        code:
+          type: string
+        short_url:
+          type: string
+        original_url:
+          type: string
+          format: uri
+        is_active:
+          type: boolean
+        total_visits:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+        last_visited_at:
+          type: [string, 'null']
+          format: date-time
+    AdminShortUrlListData:
+      type: object
+      required: [items, page, per_page, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminShortUrlListItem'
+        page:
+          type: integer
+        per_page:
+          type: integer
+        total:
+          type: integer
+    AdminShortUrlListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/AdminShortUrlListData'
+    BulkDisableData:
+      type: object
+      required: [requested, disabled, missing]
+      properties:
+        requested:
+          type: integer
+        disabled:
+          type: integer
+        missing:
+          type: array
+          items:
+            type: string
+    BulkDisableResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/BulkDisableData'

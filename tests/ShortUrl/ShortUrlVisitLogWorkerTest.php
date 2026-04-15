@@ -102,6 +102,28 @@ final class ShortUrlVisitLogWorkerTest extends TestCase
         self::assertSame(5, $queue->deadLetters[0]['attempt']);
         self::assertSame(['1-0'], $queue->acked);
     }
+
+    public function test_process_once_reclaims_pending_messages_when_main_stream_empty(): void
+    {
+        $queue = new WorkerQueueDouble();
+        $repository = new WorkerRepositoryDouble();
+
+        $queue->seedPending([
+            'short_url_code' => 'code-pending',
+            'visited_at' => '2026-04-14T10:10:10+00:00',
+            'client_ip' => '127.0.0.1',
+            'user_agent' => 'phpunit',
+            'event_key' => 'event-key-pending',
+        ]);
+
+        $worker = new ShortUrlVisitLogWorker($queue, $repository);
+        $processed = $worker->processOnce(batchSize: 100, blockMs: 1, reclaimIdleMs: 60000, reclaimCount: 10);
+
+        self::assertSame(1, $processed);
+        self::assertTrue($queue->autoClaimCalled);
+        self::assertCount(1, $repository->visitLogs);
+        self::assertSame(['p-1-0'], $queue->acked);
+    }
 }
 
 final class WorkerQueueDouble implements VisitEventQueueInterface
@@ -112,11 +134,16 @@ final class WorkerQueueDouble implements VisitEventQueueInterface
     /** @var list<string> */
     public array $acked = [];
 
+    public bool $autoClaimCalled = false;
+
     /** @var list<array{event: array{short_url_code: string, visited_at: string, client_ip: string, user_agent: string, event_key: string}, attempt: int, reason: string}> */
     public array $retries = [];
 
     /** @var list<array{event: array{short_url_code: string, visited_at: string, client_ip: string, user_agent: string, event_key: string}, attempt: int, reason: string}> */
     public array $deadLetters = [];
+
+    /** @var list<array{id: string, values: array{short_url_code: string, visited_at: string, client_ip: string, user_agent: string, event_key: string, attempt: int}}> */
+    private array $pendingEntries = [];
 
     public function push(array $event): string
     {
@@ -139,6 +166,13 @@ final class WorkerQueueDouble implements VisitEventQueueInterface
     public function consume(int $count = 100, int $blockMs = 1000): array
     {
         return array_splice($this->entries, 0, $count);
+    }
+
+    public function reclaimPending(int $count = 100, int $minIdleMs = 60000): array
+    {
+        $this->autoClaimCalled = true;
+
+        return array_splice($this->pendingEntries, 0, $count);
     }
 
     public function ack(array $messageIds): void
@@ -168,6 +202,32 @@ final class WorkerQueueDouble implements VisitEventQueueInterface
         ];
 
         return 'dead-1';
+    }
+
+    /**
+     * @param array{
+     *   short_url_code: string,
+     *   visited_at: string,
+     *   client_ip: string,
+     *   user_agent: string,
+     *   event_key: string,
+     *   attempt?: int
+     * } $event
+     */
+    public function seedPending(array $event): void
+    {
+        $id = 'p-' . (string) (count($this->pendingEntries) + 1) . '-0';
+        $this->pendingEntries[] = [
+            'id' => $id,
+            'values' => [
+                'short_url_code' => $event['short_url_code'],
+                'visited_at' => $event['visited_at'],
+                'client_ip' => $event['client_ip'],
+                'user_agent' => $event['user_agent'],
+                'event_key' => $event['event_key'],
+                'attempt' => (int) ($event['attempt'] ?? 1),
+            ],
+        ];
     }
 }
 

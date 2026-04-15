@@ -149,6 +149,12 @@ Base URL 示例：`http://127.0.0.1:9501`
 }
 ```
 
+鉴权说明：
+- 管理端接口使用 `X-Admin-Api-Key`
+- 支持通过环境变量配置多个 key：`ADMIN_API_KEYS=tenantA:keyA,tenantB:keyB`
+- 若同时配置了 `ADMIN_API_KEY`，系统也会兼容单 key 模式
+- key 可并行保留以实现平滑轮换（旧 key 与新 key 一段时间共存）
+
 ---
 
 ### 3. MySQL 表设计（核心）
@@ -257,6 +263,7 @@ SQL 文件：`database/mysql/short_url_schema.sql`
 - API 请求只入队，不同步写 `short_url_visits`
 - Worker 优先批量落库，失败自动降级单条写入
 - 单条写入失败会重试，超过阈值进入 DLQ（`shorturl:visit:stream:dlq`）
+- Worker 会在主队列为空时通过 `XAUTOCLAIM` 回收 pending（长时间未 ack）消息继续处理
 
 ---
 

@@ -185,6 +185,20 @@ final class ShortUrlApiControllerTest extends TestCase
         self::assertSame(401, $response->statusCode);
     }
 
+    public function test_admin_endpoint_accepts_rotated_api_key_from_env_list(): void
+    {
+        putenv('ADMIN_API_KEYS=old-key,new-key');
+
+        $controller = $this->newController();
+        $response = $controller->handle(new RequestContext(
+            method: 'GET',
+            path: '/api/v1/admin/short-urls',
+            headers: ['x-admin-api-key' => 'new-key']
+        ));
+
+        self::assertSame(200, $response->statusCode);
+    }
+
     private function newController(): ShortUrlApiController
     {
         $service = new ShortUrlService(

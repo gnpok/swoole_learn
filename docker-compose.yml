@@ -1,0 +1,118 @@
+version: "3.9"
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: shorturl-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: swoole_short_url
+    ports:
+      - "3306:3306"
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./database/mysql/short_url_schema.sql:/docker-entrypoint-initdb.d/01-short_url_schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: shorturl-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    image: php:8.3-cli
+    container_name: shorturl-api
+    working_dir: /app
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "9501:9501"
+    environment:
+      SWOOLE_HOST: 0.0.0.0
+      SWOOLE_PORT: 9501
+      PUBLIC_BASE_URL: http://127.0.0.1:9501
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: swoole_short_url
+      MYSQL_USERNAME: root
+      MYSQL_PASSWORD: root
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DATABASE: 0
+      REDIS_VISIT_STREAM: shorturl:visit:stream
+      REDIS_VISIT_DLQ_STREAM: shorturl:visit:stream:dlq
+      ADMIN_API_KEYS: default:replace-with-strong-key
+    volumes:
+      - ./:/app
+    command: >
+      sh -lc "
+      apt-get update &&
+      apt-get install -y git unzip libzip-dev &&
+      docker-php-ext-install pdo_mysql &&
+      php -r \"copy('https://getcomposer.org/installer', 'composer-setup.php');\" &&
+      php composer-setup.php --install-dir=/usr/local/bin --filename=composer &&
+      composer install &&
+      php examples/short_url_api_server.php
+      "
+
+  worker:
+    image: php:8.3-cli
+    container_name: shorturl-worker
+    working_dir: /app
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: swoole_short_url
+      MYSQL_USERNAME: root
+      MYSQL_PASSWORD: root
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DATABASE: 0
+      REDIS_VISIT_STREAM: shorturl:visit:stream
+      REDIS_VISIT_DLQ_STREAM: shorturl:visit:stream:dlq
+      VISIT_LOG_BATCH_SIZE: 100
+      VISIT_LOG_BLOCK_MS: 5000
+      VISIT_LOG_RECLAIM_IDLE_MS: 60000
+      VISIT_LOG_RECLAIM_COUNT: 50
+      VISIT_LOG_MAX_ATTEMPTS: 5
+    volumes:
+      - ./:/app
+    command: >
+      sh -lc "
+      apt-get update &&
+      apt-get install -y git unzip libzip-dev &&
+      docker-php-ext-install pdo_mysql &&
+      php -r \"copy('https://getcomposer.org/installer', 'composer-setup.php');\" &&
+      php composer-setup.php --install-dir=/usr/local/bin --filename=composer &&
+      composer install &&
+      php examples/short_url_visit_log_worker.php
+      "
+
+volumes:
+  mysql-data:
+  redis-data:

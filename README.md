@@ -94,7 +94,35 @@ php examples/short_url_api_server.php
 php examples/short_url_visit_log_worker.php
 ```
 
-## 8. 项目结构
+## 8. 一键本地环境（生产化演练）
+
+已提供 `docker-compose.yml`，包含：
+
+- `api`：PHP CLI + ext-swoole 容器（运行 Swoole API）
+- `worker`：访问日志异步 Worker
+- `mysql`：持久化存储
+- `redis`：缓存、限流、Stream 队列
+
+启动：
+
+```bash
+docker compose up -d --build
+```
+
+查看日志：
+
+```bash
+docker compose logs -f api
+docker compose logs -f worker
+```
+
+关闭：
+
+```bash
+docker compose down
+```
+
+## 9. 项目结构
 
 ```text
 src/
@@ -103,6 +131,7 @@ src/
 database/
   mysql/
 docs/
+docker/
 tests/
 examples/
 ```
