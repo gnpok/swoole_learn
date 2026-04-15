@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace SwooleLearn\ShortUrl\Exception;
 
-final class ConflictException extends ShortUrlException
+class ConflictException extends ShortUrlException
 {
     public function __construct(
         string $message = 'Resource conflict.',
