@@ -190,6 +190,7 @@ final class ShortUrlServiceTest extends TestCase
             $stats,
             $limiter,
             $generator,
+            null,
             $idempotency,
             $queue
         );
@@ -639,12 +640,12 @@ final class FakeVisitEventQueue implements VisitEventQueueInterface
         return $id;
     }
 
-    public function consume(string $consumerGroup, string $consumerName, int $count = 100, int $blockMs = 1000): array
+    public function consume(int $count = 100, int $blockMs = 1000): array
     {
         return array_splice($this->consumable, 0, $count);
     }
 
-    public function ack(string $consumerGroup, array $messageIds): void
+    public function ack(array $messageIds): void
     {
         foreach ($messageIds as $id) {
             $this->acked[] = $id;
