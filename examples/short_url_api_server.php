@@ -36,13 +36,17 @@ $service = new ShortUrlService(
     visitEventQueue: new RedisVisitEventQueue(
         $redis,
         stream: getenv('REDIS_VISIT_STREAM') ?: 'shorturl:visit:stream',
+        deadLetterStream: getenv('REDIS_VISIT_DLQ_STREAM') ?: 'shorturl:visit:stream:dlq',
         consumerGroup: getenv('REDIS_VISIT_CONSUMER_GROUP') ?: 'visit-log-workers',
         consumerName: getenv('REDIS_VISIT_CONSUMER_NAME') ?: 'worker-api'
     ),
     publicBaseUrl: getenv('PUBLIC_BASE_URL') ?: 'http://127.0.0.1:9501'
 );
 
-$controller = new ShortUrlApiController($service);
+$controller = new ShortUrlApiController(
+    $service,
+    getenv('ADMIN_API_KEY') ?: null
+);
 $server = new SwooleShortUrlServer(
     new SwooleHttpServerRuntime(
         getenv('SWOOLE_HOST') ?: '0.0.0.0',

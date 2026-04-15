@@ -6,6 +6,7 @@
 - `Swoole\Coroutine` 协程批量任务
 - `Swoole\Timer` 周期定时任务
 - 基于 Swoole 的短地址服务 API（MySQL + Redis）
+- 接近生产能力（幂等创建、批量落库、重试与死信、管理端鉴权）
 - 可直接运行的 PHPUnit 单元测试
 
 ## 1. 安装依赖
@@ -60,15 +61,40 @@ php examples/short_url_visit_log_worker.php
 设计文档与数据库设计：
 
 - `docs/short-url-service.md`
+- `docs/openapi-short-url.yaml`
 - `database/mysql/short_url_schema.sql`
 
 新增进阶能力：
 
 - 幂等创建（`Idempotency-Key` 请求头）
 - Redis Stream 异步访问日志（HTTP 入队 + Worker 消费写 MySQL）
+- 访问日志批量落库 + 失败重试 + 死信队列（DLQ）
 - 后台管理 API（分页筛选、批量禁用）
+- 管理端 API Key 鉴权（`X-Admin-Api-Key`）
 
-## 6. 项目结构
+## 7. 生产化运行建议（最小版）
+
+设置核心环境变量：
+
+```bash
+export ADMIN_API_KEY=replace-with-strong-key
+export REDIS_VISIT_STREAM=shorturl:visit:stream
+export REDIS_VISIT_DLQ_STREAM=shorturl:visit:stream:dlq
+```
+
+启动 API 服务：
+
+```bash
+php examples/short_url_api_server.php
+```
+
+启动访问日志 worker：
+
+```bash
+php examples/short_url_visit_log_worker.php
+```
+
+## 8. 项目结构
 
 ```text
 src/

@@ -151,7 +151,8 @@ final class ShortUrlApiControllerTest extends TestCase
         $listResponse = $controller->handle(new RequestContext(
             method: 'GET',
             path: '/api/v1/admin/short-urls',
-            query: ['page' => 1, 'per_page' => 10, 'keyword' => 'admin']
+            query: ['page' => 1, 'per_page' => 10, 'keyword' => 'admin'],
+            headers: ['x-admin-api-key' => 'test-admin-key']
         ));
         $listPayload = json_decode($listResponse->body, true);
 
@@ -161,7 +162,8 @@ final class ShortUrlApiControllerTest extends TestCase
         $bulkResponse = $controller->handle(new RequestContext(
             method: 'POST',
             path: '/api/v1/admin/short-urls/bulk-disable',
-            body: ['codes' => [$firstCode, $secondCode, 'nope1234']]
+            body: ['codes' => [$firstCode, $secondCode, 'nope1234']],
+            headers: ['x-admin-api-key' => 'test-admin-key']
         ));
         $bulkPayload = json_decode($bulkResponse->body, true);
 
@@ -169,6 +171,18 @@ final class ShortUrlApiControllerTest extends TestCase
         self::assertSame(3, $bulkPayload['data']['requested'] ?? null);
         self::assertSame(2, $bulkPayload['data']['disabled'] ?? null);
         self::assertSame(['nope1234'], $bulkPayload['data']['missing'] ?? null);
+    }
+
+    public function test_admin_endpoints_require_valid_api_key(): void
+    {
+        $controller = $this->newController();
+
+        $response = $controller->handle(new RequestContext(
+            method: 'GET',
+            path: '/api/v1/admin/short-urls'
+        ));
+
+        self::assertSame(401, $response->statusCode);
     }
 
     private function newController(): ShortUrlApiController
@@ -184,7 +198,7 @@ final class ShortUrlApiControllerTest extends TestCase
             publicBaseUrl: 'http://127.0.0.1:9501'
         );
 
-        return new ShortUrlApiController($service);
+        return new ShortUrlApiController($service, 'test-admin-key');
     }
 }
 
@@ -243,6 +257,11 @@ final class ControllerFakeRepository implements ShortUrlRepositoryInterface
 
     public function appendVisitLog(string $code, DateTimeImmutable $visitedAt, string $clientIp, string $userAgent): void
     {
+    }
+
+    public function appendVisitLogsBatch(array $logs): int
+    {
+        return count($logs);
     }
 
     public function disable(string $code): bool
@@ -445,5 +464,15 @@ final class ControllerFakeVisitEventQueue implements VisitEventQueueInterface
 
     public function ack(array $messageIds): void
     {
+    }
+
+    public function retry(array $event, int $attempt, string $reason): string
+    {
+        return 'retry-1';
+    }
+
+    public function deadLetter(array $event, int $attempt, string $reason): string
+    {
+        return 'dead-1';
     }
 }

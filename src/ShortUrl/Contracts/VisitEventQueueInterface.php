@@ -7,7 +7,14 @@ namespace SwooleLearn\ShortUrl\Contracts;
 interface VisitEventQueueInterface
 {
     /**
-     * @param array{short_url_code: string, visited_at: string, client_ip: string, user_agent: string} $event
+     * @param array{
+     *   short_url_code: string,
+     *   visited_at: string,
+     *   client_ip: string,
+     *   user_agent: string,
+     *   event_key: string,
+     *   attempt?: int
+     * } $event
      */
     public function push(array $event): string;
 
@@ -16,7 +23,9 @@ interface VisitEventQueueInterface
      *   short_url_code: string,
      *   visited_at: string,
      *   client_ip: string,
-     *   user_agent: string
+     *   user_agent: string,
+     *   event_key: string,
+     *   attempt: int
      * }}>
      */
     public function consume(int $count = 100, int $blockMs = 1000): array;
@@ -25,4 +34,26 @@ interface VisitEventQueueInterface
      * @param list<string> $messageIds
      */
     public function ack(array $messageIds): void;
+
+    /**
+     * @param array{
+     *   short_url_code: string,
+     *   visited_at: string,
+     *   client_ip: string,
+     *   user_agent: string,
+     *   event_key: string
+     * } $event
+     */
+    public function retry(array $event, int $attempt, string $reason): string;
+
+    /**
+     * @param array{
+     *   short_url_code: string,
+     *   visited_at: string,
+     *   client_ip: string,
+     *   user_agent: string,
+     *   event_key: string
+     * } $event
+     */
+    public function deadLetter(array $event, int $attempt, string $reason): string;
 }

@@ -103,16 +103,49 @@ final class PdoShortUrlRepository implements ShortUrlRepositoryInterface
 
     public function appendVisitLog(string $code, DateTimeImmutable $visitedAt, string $clientIp, string $userAgent): void
     {
-        $statement = $this->pdo->prepare(
-            'INSERT INTO short_url_visits (short_url_code, visited_at, client_ip, user_agent)
-             VALUES (:short_url_code, :visited_at, :client_ip, :user_agent)'
-        );
+        $eventKey = hash('sha256', implode('|', [$code, $visitedAt->format(DATE_ATOM), $clientIp, $userAgent]));
+
+        $statement = $this->pdo->prepare($this->visitLogInsertSql());
         $statement->execute([
+            ':event_key' => $eventKey,
             ':short_url_code' => $code,
             ':visited_at' => $visitedAt->format('Y-m-d H:i:s'),
             ':client_ip' => $clientIp,
             ':user_agent' => mb_substr($userAgent, 0, 255),
         ]);
+    }
+
+    public function appendVisitLogsBatch(array $logs): int
+    {
+        if ($logs === []) {
+            return 0;
+        }
+
+        $statement = $this->pdo->prepare($this->visitLogInsertSql());
+        $this->pdo->beginTransaction();
+        try {
+            $written = 0;
+            foreach ($logs as $log) {
+                $statement->execute([
+                    ':event_key' => (string) $log['event_key'],
+                    ':short_url_code' => (string) $log['code'],
+                    ':visited_at' => $log['visited_at']->format('Y-m-d H:i:s'),
+                    ':client_ip' => (string) $log['client_ip'],
+                    ':user_agent' => mb_substr((string) $log['user_agent'], 0, 255),
+                ]);
+                $written++;
+            }
+
+            $this->pdo->commit();
+
+            return $written;
+        } catch (\Throwable $exception) {
+            if ($this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+
+            throw $exception;
+        }
     }
 
     public function disable(string $code): bool
@@ -239,5 +272,12 @@ final class PdoShortUrlRepository implements ShortUrlRepositoryInterface
             'disabled' => $updateStatement->rowCount(),
             'missing' => $missing,
         ];
+    }
+
+    private function visitLogInsertSql(): string
+    {
+        return 'INSERT INTO short_url_visits (event_key, short_url_code, visited_at, client_ip, user_agent)
+             VALUES (:event_key, :short_url_code, :visited_at, :client_ip, :user_agent)
+             ON DUPLICATE KEY UPDATE id = id';
     }
 }

@@ -393,6 +393,20 @@ final class FakeShortUrlRepository implements ShortUrlRepositoryInterface
         ];
     }
 
+    public function appendVisitLogsBatch(array $logs): int
+    {
+        foreach ($logs as $log) {
+            $this->appendVisitLog(
+                (string) $log['code'],
+                $log['visited_at'],
+                (string) $log['client_ip'],
+                (string) $log['user_agent']
+            );
+        }
+
+        return count($logs);
+    }
+
     public function disable(string $code): bool
     {
         $record = $this->records[$code] ?? null;
@@ -619,14 +633,20 @@ final class FakeIdempotencyStore implements IdempotencyStoreInterface
 
 final class FakeVisitEventQueue implements VisitEventQueueInterface
 {
-    /** @var list<array{short_url_code: string, visited_at: string, client_ip: string, user_agent: string}> */
+    /** @var list<array{short_url_code: string, visited_at: string, client_ip: string, user_agent: string, event_key: string, attempt?: int}> */
     public array $events = [];
 
-    /** @var list<array{id: string, values: array{short_url_code: string, visited_at: string, client_ip: string, user_agent: string}}> */
+    /** @var list<array{id: string, values: array{short_url_code: string, visited_at: string, client_ip: string, user_agent: string, event_key: string, attempt: int}}> */
     private array $consumable = [];
 
     /** @var list<string> */
     public array $acked = [];
+
+    /** @var list<array{event: array{short_url_code: string, visited_at: string, client_ip: string, user_agent: string, event_key: string}, attempt: int, reason: string}> */
+    public array $retries = [];
+
+    /** @var list<array{event: array{short_url_code: string, visited_at: string, client_ip: string, user_agent: string, event_key: string}, attempt: int, reason: string}> */
+    public array $deadLetters = [];
 
     public function push(array $event): string
     {
@@ -634,7 +654,14 @@ final class FakeVisitEventQueue implements VisitEventQueueInterface
         $this->events[] = $event;
         $this->consumable[] = [
             'id' => $id,
-            'values' => $event,
+            'values' => [
+                'short_url_code' => $event['short_url_code'],
+                'visited_at' => $event['visited_at'],
+                'client_ip' => $event['client_ip'],
+                'user_agent' => $event['user_agent'],
+                'event_key' => $event['event_key'],
+                'attempt' => (int) ($event['attempt'] ?? 1),
+            ],
         ];
 
         return $id;
@@ -650,5 +677,27 @@ final class FakeVisitEventQueue implements VisitEventQueueInterface
         foreach ($messageIds as $id) {
             $this->acked[] = $id;
         }
+    }
+
+    public function retry(array $event, int $attempt, string $reason): string
+    {
+        $this->retries[] = [
+            'event' => $event,
+            'attempt' => $attempt,
+            'reason' => $reason,
+        ];
+
+        return 'retry-1';
+    }
+
+    public function deadLetter(array $event, int $attempt, string $reason): string
+    {
+        $this->deadLetters[] = [
+            'event' => $event,
+            'attempt' => $attempt,
+            'reason' => $reason,
+        ];
+
+        return 'dead-1';
     }
 }

@@ -1,0 +1,92 @@
+openapi: 3.1.0
+info:
+  title: Swoole Short URL Service API
+  version: 1.1.0
+  description: |
+    Production-like short URL API specification with async visit log worker,
+    idempotent create, and admin-protected management endpoints.
+servers:
+  - url: http://127.0.0.1:9501
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: Service healthy
+  /api/v1/short-urls:
+    post:
+      summary: Create short URL
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  format: uri
+                custom_code:
+                  type: string
+                expires_at:
+                  type: string
+                  format: date-time
+      responses:
+        '201':
+          description: Created
+        '409':
+          description: Conflict
+        '422':
+          description: Validation error
+        '429':
+          description: Rate limit exceeded
+  /r/{code}:
+    get:
+      summary: Redirect to original URL
+      parameters:
+        - in: path
+          name: code
+          required: true
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirected
+        '404':
+          description: Not found
+        '410':
+          description: Inactive or expired
+  /api/v1/admin/short-urls:
+    get:
+      summary: List short URLs
+      security:
+        - AdminApiKey: []
+      responses:
+        '200':
+          description: Listed
+        '401':
+          description: Unauthorized
+  /api/v1/admin/short-urls/bulk-disable:
+    post:
+      summary: Disable short URLs in bulk
+      security:
+        - AdminApiKey: []
+      responses:
+        '200':
+          description: Bulk disabled result
+        '401':
+          description: Unauthorized
+components:
+  securitySchemes:
+    AdminApiKey:
+      type: apiKey
+      in: header
+      name: X-Admin-Api-Key
