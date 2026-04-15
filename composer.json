@@ -3,7 +3,8 @@
     "description": "Swoole learning examples with tests",
     "type": "project",
     "require": {
-        "php": "^8.3"
+        "php": "^8.3",
+        "predis/predis": "^3.4"
     },
     "require-dev": {
         "phpunit/phpunit": "^12.5"

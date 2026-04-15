@@ -5,6 +5,7 @@
 - `Swoole\Http\Server` 请求路由处理
 - `Swoole\Coroutine` 协程批量任务
 - `Swoole\Timer` 周期定时任务
+- 基于 Swoole 的短地址服务 API（MySQL + Redis）
 - 可直接运行的 PHPUnit 单元测试
 
 ## 1. 安装依赖
@@ -39,13 +40,36 @@ composer test
 php examples/http_server.php
 php examples/coroutine_batch.php
 php examples/timer_tick.php
+php examples/short_url_api_server.php
 ```
 
-## 5. 项目结构
+## 5. 短地址服务学习模块
+
+短地址服务代码位置：
+
+- 业务层：`src/ShortUrl/Service/ShortUrlService.php`
+- API 控制器：`src/ShortUrl/Http/ShortUrlApiController.php`
+- Swoole 接入层：`src/ShortUrl/Http/SwooleShortUrlServer.php`
+- MySQL 仓储：`src/ShortUrl/Infrastructure/PdoShortUrlRepository.php`
+- Redis 缓存/统计/限流：
+  - `src/ShortUrl/Infrastructure/RedisShortUrlCache.php`
+  - `src/ShortUrl/Infrastructure/RedisStatsStore.php`
+  - `src/ShortUrl/Infrastructure/RedisRateLimiter.php`
+
+设计文档与数据库设计：
+
+- `docs/short-url-service.md`
+- `database/mysql/short_url_schema.sql`
+
+## 6. 项目结构
 
 ```text
 src/
   Learning/
+  ShortUrl/
+database/
+  mysql/
+docs/
 tests/
 examples/
 ```
